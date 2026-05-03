@@ -1,35 +1,47 @@
-"""Quick test for the upgraded pipeline (RSI + cooldown + trend filter)."""
-from main import run_pipeline
+"""Test model persistence: train → save → load → predict."""
+import os
+from main import run_pipeline, train_rl_only
+from rl_agent import is_model_saved, load_rl_model
+
+# Clean up any old model
+model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rl_model.zip")
+if os.path.exists(model_path):
+    os.remove(model_path)
+    print("Cleaned old model.")
 
 print("=" * 60)
-print("TESTING UPGRADED ML PIPELINE (RSI + Cooldown + Trend Filter)")
+print("TEST 1: Train RL model and save")
 print("=" * 60)
-r = run_pipeline("AAPL", "2y", model_type="ML")
-if r:
-    print(f"ML: {len(r['trades'])} trades")
-    print(f"ML Training: {r['training_details']}")
-    m = r['metrics']
-    print(f"ML Return: {m.get('Total_Return', 0):.2%}")
-    print(f"ML Win Rate: {m.get('Win_Rate', 0):.2%}")
-    print(f"ML Sharpe: {m.get('Sharpe_Ratio', 0):.2f}")
-else:
-    print("ML: No results")
+stats = train_rl_only("AAPL", period="2y", rl_timesteps=5000)
+print(f"Training done. Episodes: {stats['total_episodes']}, Avg Reward: {stats['avg_reward']:.4f}")
+print(f"Model saved: {is_model_saved()}")
+assert is_model_saved(), "Model should be saved!"
 
 print()
 print("=" * 60)
-print("TESTING UPGRADED RL PIPELINE (RSI + Cooldown + Trend Filter)")
+print("TEST 2: Load saved model")
 print("=" * 60)
-r2 = run_pipeline("AAPL", "2y", model_type="RL", rl_timesteps=5000)
-if r2:
-    print(f"RL: {len(r2['trades'])} trades")
-    td = r2['training_details']
-    print(f"RL Training: Algorithm={td['algorithm']}, Timesteps={td['timesteps']}, Episodes={td['total_episodes']}, Avg Reward={td['avg_reward']:.4f}")
-    m2 = r2['metrics']
-    print(f"RL Return: {m2.get('Total_Return', 0):.2%}")
-    print(f"RL Win Rate: {m2.get('Win_Rate', 0):.2%}")
-    print(f"RL Sharpe: {m2.get('Sharpe_Ratio', 0):.2f}")
-else:
-    print("RL: No results")
+model = load_rl_model()
+assert model is not None, "Model should load!"
+print("Model loaded successfully.")
+
+print()
+print("=" * 60)
+print("TEST 3: Run simulation with saved model (FAST)")
+print("=" * 60)
+import time
+start = time.time()
+r = run_pipeline("AAPL", "2y", model_type="RL", rl_timesteps=5000, use_saved_model=True)
+elapsed = time.time() - start
+print(f"Fast simulation: {len(r['trades'])} trades in {elapsed:.1f}s")
+print(f"Mode: {r['training_details'].get('mode', 'N/A')}")
+
+print()
+print("=" * 60)
+print("TEST 4: ML pipeline still works")
+print("=" * 60)
+r2 = run_pipeline("AAPL", "2y", model_type="ML")
+print(f"ML: {len(r2['trades'])} trades, Win Rate: {r2['metrics'].get('Win_Rate', 0):.2%}")
 
 print()
 print("ALL TESTS PASSED!")

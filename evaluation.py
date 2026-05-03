@@ -71,10 +71,13 @@ def walk_forward_analysis(df, feature_cols, train_window_days=365, test_window_d
 
 
 def walk_forward_analysis_rl(df, feature_cols, train_window_days=365, test_window_days=90,
-                              total_timesteps=10000):
+                              total_timesteps=10000, pretrained_model=None):
     """
     Performs walk-forward analysis for RL agent (DQN).
     Same sliding window logic: Train DQN → Predict actions → Simulate → Shift.
+
+    If pretrained_model is provided, skips training and uses the saved model
+    for all windows (fast simulation mode).
 
     Args:
         df (pd.DataFrame): Feature-engineered dataframe.
@@ -82,6 +85,7 @@ def walk_forward_analysis_rl(df, feature_cols, train_window_days=365, test_windo
         train_window_days (int): Training window in calendar days.
         test_window_days (int): Testing window in calendar days.
         total_timesteps (int): DQN training timesteps per window.
+        pretrained_model: Optional pre-trained DQN model (skips training if provided).
 
     Returns:
         dict: Aggregated performance metrics.
@@ -91,7 +95,10 @@ def walk_forward_analysis_rl(df, feature_cols, train_window_days=365, test_windo
     # Import here to avoid circular imports
     from rl_agent import train_rl_agent, predict_rl_actions
 
-    logging.info(f"Starting RL Walk-Forward Analysis (Train: {train_window_days}d, Test: {test_window_days}d, Timesteps: {total_timesteps})")
+    use_pretrained = pretrained_model is not None
+    mode_str = "FAST (pre-trained)" if use_pretrained else "FULL (train per window)"
+    logging.info(f"Starting RL Walk-Forward Analysis [{mode_str}] "
+                 f"(Train: {train_window_days}d, Test: {test_window_days}d, Timesteps: {total_timesteps})")
 
     all_trades = []
     last_training_stats = {}
@@ -119,10 +126,21 @@ def walk_forward_analysis_rl(df, feature_cols, train_window_days=365, test_windo
         logging.info(f"RL Window {window_count}: Train {start_date.date()} to {train_end_date.date()}, "
                      f"Test {train_end_date.date()} to {test_end_date.date()}")
 
-        # Train DQN agent on training window
-        model, training_stats = train_rl_agent(train_data, feature_cols,
-                                                total_timesteps=total_timesteps)
-        last_training_stats = training_stats
+        if use_pretrained:
+            # Use the pre-trained model (fast mode)
+            model = pretrained_model
+            last_training_stats = {
+                'total_episodes': 0, 'avg_reward': 0.0,
+                'best_reward': 0.0, 'worst_reward': 0.0,
+                'avg_episode_length': 0,
+                'total_timesteps': 0, 'algorithm': 'DQN',
+                'mode': 'pre-trained'
+            }
+        else:
+            # Train DQN agent on training window
+            model, training_stats = train_rl_agent(train_data, feature_cols,
+                                                    total_timesteps=total_timesteps)
+            last_training_stats = training_stats
 
         # Generate actions on test data
         actions = predict_rl_actions(model, test_data, feature_cols)

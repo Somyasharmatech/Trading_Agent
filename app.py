@@ -3,38 +3,51 @@ app.py — Streamlit Dashboard for AI Trading Agent
 
 Features:
 - Model selector: ML (RandomForest) vs RL (DQN)
+- Train RL Model button (train once, predict many times)
+- Cached model loading for instant predictions
 - Live prediction for next trading day
 - Walk-forward backtesting simulation
-- Performance metrics (Sharpe, Sortino, Drawdown, Calmar, Profit Factor)
-- Strategy vs Buy & Hold comparison
-- Price + Signals chart, Equity curve, Drawdown chart
-- Trade history table with CSV export
-- Training details visibility (ML accuracy / RL episodes, reward)
-- Model explanation panel
-- Performance disclaimer
-- Multi-stock testing (bonus)
+- Performance metrics, Strategy vs Buy & Hold
+- Charts, Trade history, Monte Carlo, Multi-stock testing
+- Model explanation panel + Performance disclaimer
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
+import os
 import plotly.graph_objects as go
 import plotly.express as px
-from main import run_pipeline, get_live_prediction, run_multi_stock_test
+from main import run_pipeline, get_live_prediction, run_multi_stock_test, train_rl_only
 
 st.set_page_config(page_title="AI Trading Agent", layout="wide", page_icon="🤖")
 
 st.title("🤖 AI Trading Agent with Advanced Risk Logic")
 st.markdown("AI-driven trading system using **machine learning** and **reinforcement learning**, with risk-aware logic and backtesting.")
 
-# --- SIDEBAR (LEFT PANEL) ---
+
+# --- CACHED MODEL LOADING ---
+@st.cache_resource
+def load_cached_rl_model():
+    """Loads the saved RL model once and caches it across reruns."""
+    from rl_agent import load_rl_model
+    return load_rl_model()
+
+
+def check_model_exists():
+    """Check if a trained RL model file exists."""
+    from rl_agent import is_model_saved
+    return is_model_saved()
+
+
+# --- SIDEBAR ---
 st.sidebar.header("⚙️ Simulation Parameters")
 ticker = st.sidebar.text_input("Ticker Symbol", value="AAPL")
 period = st.sidebar.selectbox("Data Period", options=["1y", "2y", "5y", "10y"], index=2)
 
 st.sidebar.markdown("---")
 
-# 🔥 MODEL SELECTOR
+# MODEL SELECTOR
 st.sidebar.header("🧠 Model Selection")
 model_type = st.sidebar.radio(
     "Model Type",
@@ -42,22 +55,34 @@ model_type = st.sidebar.radio(
     index=0,
     help="ML Model uses RandomForest classifier. RL Agent uses DQN reinforcement learning."
 )
-
-# Map display name to internal key
 model_key = "ML" if model_type == "ML Model" else "RL"
 
 # RL-specific controls
-rl_timesteps = 30000
+rl_timesteps = 10000
+rl_training_mode = "Demo (10K)"
 if model_key == "RL":
-    rl_timesteps = st.sidebar.slider("DQN Training Timesteps", 5000, 50000, 30000, step=5000,
-                                      help="More timesteps = better learning but slower training. Recommended: 30,000+")
+    rl_training_mode = st.sidebar.selectbox(
+        "Training Mode",
+        options=["Demo (10K)", "Standard (30K)", "Full (50K)"],
+        index=0,
+        help="Demo: fast for presentations. Full: best results but slower."
+    )
+    timestep_map = {"Demo (10K)": 10000, "Standard (30K)": 30000, "Full (50K)": 50000}
+    rl_timesteps = timestep_map[rl_training_mode]
+
+    # Show saved model status
+    if check_model_exists():
+        st.sidebar.success("✅ Saved RL model found")
+    else:
+        st.sidebar.warning("⚠️ No saved model — click Train first")
 
 st.sidebar.markdown("---")
 st.sidebar.header("📐 Walk-Forward Settings")
 train_window = st.sidebar.slider("Train Window (days)", 100, 1000, 365)
 test_window = st.sidebar.slider("Test Window (days)", 30, 365, 90)
 
-# --- MODEL EXPLANATION PANEL ---
+
+# --- MODEL EXPLANATION ---
 with st.expander("🧠 Model Explanation — How This System Works", expanded=False):
     st.markdown("""
     ### How This Trading System Works
@@ -77,7 +102,8 @@ with st.expander("🧠 Model Explanation — How This System Works", expanded=Fa
     **🧠 RL Agent (DQN — Deep Q-Network):**
     - A **reinforcement learning agent** learns BUY/SELL/HOLD actions through trial and error
     - The agent receives **rewards** based on: `PnL × Risk-Reward Bonus - Overtrading Penalty - Holding Penalty - Transaction Cost`
-    - State includes **9 features + position state** (whether currently holding)
+    - State includes **8 market features + position state** (whether currently holding)
+    - **Model persistence:** Train once → Save → Reuse for fast predictions
     - Best for: Adaptive behavior that optimizes for cumulative reward
 
     **🛡️ Risk Management:**
@@ -93,7 +119,8 @@ with st.expander("🧠 Model Explanation — How This System Works", expanded=Fa
     - **Metrics:** Sharpe, Sortino, Max Drawdown, Calmar, Profit Factor, Win Rate
     """)
 
-# --- PERFORMANCE DISCLAIMER ---
+
+# --- DISCLAIMER ---
 st.info(
     "⚠️ **Disclaimer:** Financial markets are noisy and difficult to predict. "
     "This system focuses on learning trading behavior and risk management rather than guaranteed profits. "
@@ -111,7 +138,6 @@ with st.spinner(f"Generating live prediction for {ticker} using {model_type}..."
 
 if live_pred:
     emoji = live_pred.get('emoji', '⚪')
-
     if live_pred.get('confidence') is not None:
         st.success(
             f"**{ticker} ({live_pred['date']}) Last Close:** ${live_pred['latest_close']:.2f}  |  "
@@ -130,28 +156,83 @@ else:
 
 st.markdown("---")
 
-# --- MAIN SIMULATION ---
-run_col, multi_col = st.columns(2)
+# --- ACTION BUTTONS ---
+if model_key == "RL":
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
 
-with run_col:
-    run_sim = st.button("🚀 Run Historical Simulation", type="primary", use_container_width=True)
+    with btn_col1:
+        train_rl = st.button("🧠 Train RL Model", type="secondary", use_container_width=True,
+                              help="Train the DQN agent and save it. Only needed once.")
+    with btn_col2:
+        run_sim = st.button("🚀 Run Simulation", type="primary", use_container_width=True,
+                             help="Run backtesting. Uses saved model if available (fast).")
+    with btn_col3:
+        run_multi = st.button("🌍 Multi-Stock Test", use_container_width=True)
+else:
+    btn_col1, btn_col2 = st.columns(2)
+    train_rl = False
 
-with multi_col:
-    run_multi = st.button("🌍 Multi-Stock Test (5 Tickers)", use_container_width=True)
+    with btn_col1:
+        run_sim = st.button("🚀 Run Simulation", type="primary", use_container_width=True)
+    with btn_col2:
+        run_multi = st.button("🌍 Multi-Stock Test", use_container_width=True)
+
+
+# --- TRAIN RL MODEL ---
+if model_key == "RL" and train_rl:
+    with st.status(f"🧠 Training RL Agent ({rl_training_mode})...", expanded=True) as status:
+        st.write(f"📥 Fetching {ticker} data (last 2 years for training)...")
+        st.write(f"🧠 Training DQN agent with {rl_timesteps:,} timesteps...")
+        st.write("⏳ This may take a few seconds...")
+
+        training_stats = train_rl_only(
+            ticker=ticker, period="2y", rl_timesteps=rl_timesteps
+        )
+
+        if training_stats:
+            status.update(label="✅ RL Model Trained & Saved!", state="complete", expanded=True)
+
+            st.markdown(f"""
+            **Training Complete:**
+            - **Ticker:** {training_stats.get('ticker', ticker)}
+            - **Data:** {training_stats.get('data_rows', 0)} trading days
+            - **Timesteps:** {training_stats.get('total_timesteps', 0):,}
+            - **Episodes:** {training_stats.get('total_episodes', 0)}
+            - **Avg Reward:** {training_stats.get('avg_reward', 0):.4f}
+            - **Best Reward:** {training_stats.get('best_reward', 0):.4f}
+            - **Model saved to:** `rl_model.zip`
+
+            👉 Click **Run Simulation** to use the trained model (fast).
+            """)
+
+            # Clear the cached model so it reloads the new one
+            load_cached_rl_model.clear()
+        else:
+            status.update(label="❌ Training Failed", state="error")
+            st.error("Failed to train RL model. Check the ticker symbol.")
 
 
 # --- SINGLE STOCK SIMULATION ---
 if run_sim:
-    with st.status(f"Running {model_type} simulation...", expanded=True) as status:
+    use_saved = model_key == "RL" and check_model_exists()
+    mode_label = f"{model_type} ({'saved model' if use_saved else 'training per window'})"
+
+    with st.status(f"Running {mode_label} simulation...", expanded=True) as status:
         st.write("📥 Fetching data...")
-        st.write(f"🧠 Training {'DQN agent (' + str(rl_timesteps) + ' timesteps)' if model_key == 'RL' else 'RandomForest model'}...")
+
+        if model_key == "RL" and use_saved:
+            st.write("⚡ Loading saved RL model (fast mode)...")
+        else:
+            st.write(f"🧠 Training {'DQN agent (' + str(rl_timesteps) + ' timesteps)' if model_key == 'RL' else 'RandomForest model'}...")
+
         st.write("📊 Backtesting strategy (Walk-Forward)...")
         st.write("📈 Calculating metrics...")
 
         results = run_pipeline(
             ticker, period, train_window, test_window,
             model_type=model_key,
-            rl_timesteps=rl_timesteps
+            rl_timesteps=rl_timesteps,
+            use_saved_model=use_saved
         )
 
         status.update(label="✅ Simulation Complete!", state="complete", expanded=False)
@@ -167,7 +248,7 @@ if run_sim:
         baseline_equity = results['baseline_equity']
         training_details = results.get('training_details', {})
 
-        # --- SECTION 1: PERFORMANCE METRICS ---
+        # --- PERFORMANCE METRICS ---
         st.subheader("📊 Performance Summary")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total Trades", metrics.get('Total_Trades', 0))
@@ -183,7 +264,7 @@ if run_sim:
 
         st.markdown("---")
 
-        # --- SECTION 2: STRATEGY vs BUY & HOLD ---
+        # --- STRATEGY vs BUY & HOLD ---
         st.subheader("⚖️ Strategy vs Buy & Hold Comparison")
         strat_return = metrics.get('Total_Return', 0)
         bh_return = baseline.get('Total_Return', 0)
@@ -202,13 +283,13 @@ if run_sim:
 
         st.markdown("---")
 
-        # --- SECTION 3: TRAINING DETAILS ---
+        # --- TRAINING DETAILS ---
         st.subheader("🧠 Training Details")
 
         if training_details.get('model_type') == 'RL':
             t1, t2, t3, t4 = st.columns(4)
             t1.metric("Algorithm", training_details.get('algorithm', 'DQN'))
-            t2.metric("Timesteps", f"{training_details.get('timesteps', 0):,}")
+            t2.metric("Mode", training_details.get('mode', 'N/A'))
             t3.metric("Episodes", training_details.get('total_episodes', 0))
             t4.metric("Avg Reward", f"{training_details.get('avg_reward', 0):.4f}")
 
@@ -216,19 +297,18 @@ if run_sim:
             **RL Agent Configuration:**
             - **Algorithm:** DQN (Deep Q-Network)
             - **Policy:** MlpPolicy (Multi-Layer Perceptron)
-            - **Total Timesteps:** {training_details.get('timesteps', 0):,}
+            - **Mode:** {training_details.get('mode', 'N/A')}
             - **Episodes Completed:** {training_details.get('total_episodes', 0)}
             - **Average Episode Reward:** {training_details.get('avg_reward', 0):.4f}
             - **Best Episode Reward:** {training_details.get('best_reward', 0):.4f}
             - **Worst Episode Reward:** {training_details.get('worst_reward', 0):.4f}
-            - **Avg Episode Length:** {training_details.get('avg_episode_length', 0):.0f} steps
             - **Reward Formula:** `PnL × RR_bonus - overtrading_penalty - holding_penalty - cost`
             - **Actions:** 0=HOLD, 1=BUY, 2=SELL
             - **State:** Returns, Volatility, RSI, Body Ratio, Wicks, SMA Ratios, Position
             - **Constraints:** Cooldown (3 days), Trend Filter (SMA_10 > SMA_50)
             """)
 
-        else:  # ML
+        else:
             t1, t2, t3, t4 = st.columns(4)
             t1.metric("Algorithm", "RandomForest")
             t2.metric("Estimators", training_details.get('n_estimators', 100))
@@ -240,11 +320,8 @@ if run_sim:
             - **Model:** RandomForestClassifier
             - **n_estimators:** {training_details.get('n_estimators', 100)}
             - **max_depth:** {training_details.get('max_depth', 5)}
-            - **Confidence Threshold:** 60% (only trades above this)
-            - **Features Used:**
-              - Returns, 10-day Volatility, RSI (14-period)
-              - Candle structure (Body Ratio, Upper Wick, Lower Wick)
-              - SMA indicators (SMA_10 ratio, SMA_50 ratio)
+            - **Confidence Threshold:** 60%
+            - **Features:** Returns, Volatility, RSI, Candle structure, SMA indicators
             - **Dataset Size:** {len(df)} trading days
             - **Constraints:** Cooldown (3 days), Trend Filter (SMA_10 > SMA_50)
             - **Validation:** Walk-Forward Analysis (Train: {train_window}d, Test: {test_window}d)
@@ -252,12 +329,11 @@ if run_sim:
 
         st.markdown("---")
 
-        # --- SECTION 4: VISUALIZATIONS ---
+        # --- VISUALIZATIONS ---
         show_charts = st.checkbox("📉 Show Visualizations", value=True)
 
         if show_charts:
             st.subheader("📈 Charts")
-
             tab1, tab2, tab3 = st.tabs(["Price Chart with Signals", "Equity Curve", "Drawdown Chart"])
 
             with tab1:
@@ -266,7 +342,6 @@ if run_sim:
                     x=df.index, y=df['Close'], mode='lines',
                     name='Close Price', line=dict(color='#1f77b4', width=1)
                 ))
-
                 if not trades_df.empty:
                     entries = trades_df[['Entry_Date', 'Entry_Price']].copy()
                     fig_price.add_trace(go.Scatter(
@@ -274,18 +349,15 @@ if run_sim:
                         mode='markers', name='BUY',
                         marker=dict(color='#00cc96', size=10, symbol='triangle-up')
                     ))
-
                     exits = trades_df[['Exit_Date', 'Exit_Price']].copy()
                     fig_price.add_trace(go.Scatter(
                         x=exits['Exit_Date'], y=exits['Exit_Price'],
                         mode='markers', name='SELL',
                         marker=dict(color='#ef553b', size=10, symbol='triangle-down')
                     ))
-
                 fig_price.update_layout(
                     title=f"Stock Price with {model_type} Trade Signals",
-                    xaxis_title="Date", yaxis_title="Price ($)",
-                    template="plotly_white"
+                    xaxis_title="Date", yaxis_title="Price ($)", template="plotly_white"
                 )
                 st.plotly_chart(fig_price, use_container_width=True)
 
@@ -293,56 +365,48 @@ if run_sim:
                 fig_equity = go.Figure()
                 fig_equity.add_trace(go.Scatter(
                     x=daily_equity.index, y=daily_equity.values,
-                    mode='lines', name=f'{model_type} Strategy',
-                    line=dict(color='#636efa', width=2)
+                    mode='lines', name=f'{model_type} Strategy', line=dict(color='#636efa', width=2)
                 ))
                 fig_equity.add_trace(go.Scatter(
                     x=baseline_equity.index, y=baseline_equity.values,
-                    mode='lines', name='Buy & Hold',
-                    line=dict(color='#ffa15a', dash='dash', width=2)
+                    mode='lines', name='Buy & Hold', line=dict(color='#ffa15a', dash='dash', width=2)
                 ))
                 fig_equity.update_layout(
                     title=f"Capital Growth: {model_type} Strategy vs Buy & Hold (Initial: $100,000)",
-                    xaxis_title="Date", yaxis_title="Portfolio Value ($)",
-                    template="plotly_white"
+                    xaxis_title="Date", yaxis_title="Portfolio Value ($)", template="plotly_white"
                 )
                 st.plotly_chart(fig_equity, use_container_width=True)
 
             with tab3:
                 running_max = daily_equity.cummax()
                 drawdown = (daily_equity - running_max) / running_max
-
                 fig_dd = go.Figure()
                 fig_dd.add_trace(go.Scatter(
                     x=drawdown.index, y=drawdown.values,
-                    fill='tozeroy', name='Drawdown',
-                    line=dict(color='#ef553b')
+                    fill='tozeroy', name='Drawdown', line=dict(color='#ef553b')
                 ))
                 fig_dd.update_layout(
                     title=f"{model_type} Strategy Drawdown Over Time",
-                    xaxis_title="Date", yaxis_title="Drawdown (%)",
-                    template="plotly_white"
+                    xaxis_title="Date", yaxis_title="Drawdown (%)", template="plotly_white"
                 )
                 fig_dd.layout.yaxis.tickformat = ',.1%'
                 st.plotly_chart(fig_dd, use_container_width=True)
 
         st.markdown("---")
 
-        # --- SECTION 5: TRADE HISTORY TABLE ---
+        # --- TRADE HISTORY ---
         st.subheader("📋 Trade History")
         if not trades_df.empty:
             display_cols = ['Entry_Date', 'Exit_Date', 'Entry_Price', 'Exit_Price',
                           'Net_PnL', 'Duration', 'Exit_Reason', 'Reward']
             available_cols = [c for c in display_cols if c in trades_df.columns]
             hist_df = trades_df[available_cols].copy()
-
             hist_df['Entry_Date'] = pd.to_datetime(hist_df['Entry_Date']).dt.date
             hist_df['Exit_Date'] = pd.to_datetime(hist_df['Exit_Date']).dt.date
             hist_df['Entry_Price'] = hist_df['Entry_Price'].round(2)
             hist_df['Exit_Price'] = hist_df['Exit_Price'].round(2)
             hist_df['Net_PnL'] = hist_df['Net_PnL'].apply(lambda x: f"{x:.2%}")
             hist_df['Reward'] = hist_df['Reward'].apply(lambda x: f"{x:.4f}")
-
             st.dataframe(hist_df, use_container_width=True)
 
             csv = hist_df.to_csv(index=False).encode('utf-8')
@@ -357,7 +421,7 @@ if run_sim:
 
         st.markdown("---")
 
-        # --- SECTION 6: MONTE CARLO RESULTS ---
+        # --- MONTE CARLO ---
         if metrics.get('MC_Final_Capital_Mean'):
             st.subheader("🎲 Monte Carlo Robustness Test")
             mc1, mc2, mc3, mc4 = st.columns(4)
@@ -370,25 +434,20 @@ if run_sim:
 # --- MULTI-STOCK TESTING ---
 if run_multi:
     multi_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"]
-    
+
     with st.status(f"Running {model_type} on {len(multi_tickers)} tickers...", expanded=True) as status:
         for t in multi_tickers:
             st.write(f"📊 Processing {t}...")
-        
+
         all_results, avg_metrics = run_multi_stock_test(
-            tickers=multi_tickers,
-            period=period,
-            train_window=train_window,
-            test_window=test_window,
-            model_type=model_key,
-            rl_timesteps=rl_timesteps
+            tickers=multi_tickers, period=period,
+            train_window=train_window, test_window=test_window,
+            model_type=model_key, rl_timesteps=rl_timesteps
         )
-        
         status.update(label="✅ Multi-Stock Test Complete!", state="complete", expanded=False)
-    
+
     st.subheader(f"🌍 Multi-Stock Test Results ({model_type})")
-    
-    # Average metrics
+
     if avg_metrics:
         st.markdown("#### 📊 Average Performance Across All Tickers")
         a1, a2, a3, a4 = st.columns(4)
@@ -396,10 +455,8 @@ if run_multi:
         a2.metric("Avg Win Rate", f"{avg_metrics.get('Win_Rate', 0):.2%}")
         a3.metric("Avg Return", f"{avg_metrics.get('Total_Return', 0):.2%}")
         a4.metric("Avg Sharpe", f"{avg_metrics.get('Sharpe_Ratio', 0):.2f}")
-    
-    # Per-ticker breakdown
+
     st.markdown("#### 📋 Per-Ticker Breakdown")
-    
     table_data = []
     for r in all_results:
         m = r.get('metrics', {})
@@ -414,5 +471,4 @@ if run_multi:
             'Max DD': f"{m.get('Max_Drawdown', 0):.2%}" if m else "N/A",
             'Status': '✅' if r.get('num_trades', 0) > 0 else '❌'
         })
-    
     st.dataframe(pd.DataFrame(table_data), use_container_width=True)

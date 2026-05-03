@@ -2,7 +2,7 @@
 main.py — Main Pipeline Orchestrator
 
 Supports both ML (RandomForest) and RL (DQN) pipelines.
-Routes execution based on model_type parameter.
+RL model persistence: train once → save → use for fast simulation.
 Includes multi-stock testing capability.
 """
 
@@ -18,8 +18,43 @@ from model import train_model, predict
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+def train_rl_only(ticker="AAPL", period="2y", rl_timesteps=10000):
+    """
+    Trains an RL agent on the data and saves it to disk.
+    Uses last 1–2 years of data for faster, more relevant training.
+
+    Args:
+        ticker (str): Stock ticker symbol.
+        period (str): Data period for training (default '2y' for speed).
+        rl_timesteps (int): DQN training timesteps.
+
+    Returns:
+        dict: Training statistics.
+    """
+    from rl_agent import train_rl_agent
+
+    logging.info(f"--- Training RL Model for {ticker} ({period} data, {rl_timesteps} timesteps) ---")
+
+    df = load_data(ticker, period)
+    if df.empty:
+        return None
+
+    df_features, feature_cols = engineer_features(df)
+
+    model, training_stats = train_rl_agent(
+        df_features, feature_cols,
+        total_timesteps=rl_timesteps
+    )
+
+    training_stats['ticker'] = ticker
+    training_stats['data_period'] = period
+    training_stats['data_rows'] = len(df_features)
+
+    return training_stats
+
+
 def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
-                 model_type="ML", rl_timesteps=30000):
+                 model_type="ML", rl_timesteps=10000, use_saved_model=False):
     """
     Runs the complete end-to-end trading pipeline.
 
@@ -29,7 +64,8 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
         train_window (int): Walk-forward train window in days.
         test_window (int): Walk-forward test window in days.
         model_type (str): 'ML' for RandomForest, 'RL' for DQN agent.
-        rl_timesteps (int): DQN training timesteps (default 30,000).
+        rl_timesteps (int): DQN training timesteps.
+        use_saved_model (bool): If True, loads saved RL model instead of retraining.
 
     Returns:
         dict: Results including trades, metrics, equity curves, and training details.
@@ -42,7 +78,7 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
         logging.error("Failed to load data. Exiting pipeline.")
         return None
 
-    # 2. Engineer Features (now includes RSI)
+    # 2. Engineer Features (includes RSI)
     df_features, feature_cols = engineer_features(df)
 
     # 3. Baseline Performance (Buy & Hold)
@@ -52,23 +88,38 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
     training_details = {}
 
     if model_type == "RL":
+        pretrained_model = None
+
+        # Try to load saved model if requested
+        if use_saved_model:
+            from rl_agent import load_rl_model
+            pretrained_model = load_rl_model()
+            if pretrained_model:
+                logging.info("Using saved RL model (fast simulation mode).")
+            else:
+                logging.warning("No saved model found. Will train per window.")
+
         metrics, trades_df, rl_training_stats = walk_forward_analysis_rl(
             df_features, feature_cols,
             train_window_days=train_window,
             test_window_days=test_window,
-            total_timesteps=rl_timesteps
+            total_timesteps=rl_timesteps,
+            pretrained_model=pretrained_model
         )
+
+        is_pretrained = rl_training_stats.get('mode') == 'pre-trained'
 
         training_details = {
             'model_type': 'RL',
             'algorithm': 'DQN',
-            'timesteps': rl_timesteps,
+            'timesteps': rl_training_stats.get('total_timesteps', rl_timesteps),
             'total_episodes': rl_training_stats.get('total_episodes', 0),
             'avg_reward': rl_training_stats.get('avg_reward', 0.0),
             'best_reward': rl_training_stats.get('best_reward', 0.0),
             'worst_reward': rl_training_stats.get('worst_reward', 0.0),
             'avg_episode_length': rl_training_stats.get('avg_episode_length', 0),
-            'reward_formula': 'PnL × RR_bonus - overtrading - holding - cost'
+            'reward_formula': 'PnL × RR_bonus - overtrading - holding - cost',
+            'mode': 'Pre-trained (saved model)' if is_pretrained else f'Fresh training ({rl_timesteps:,} steps)'
         }
 
     else:  # ML (default)
@@ -119,27 +170,15 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
 
 
 def run_multi_stock_test(tickers, period="5y", train_window=365, test_window=90,
-                         model_type="ML", rl_timesteps=30000):
+                         model_type="ML", rl_timesteps=10000):
     """
     Runs the pipeline on multiple tickers and aggregates results.
-    
-    Args:
-        tickers (list): List of ticker symbols.
-        period (str): Data period.
-        train_window (int): Train window days.
-        test_window (int): Test window days.
-        model_type (str): 'ML' or 'RL'.
-        rl_timesteps (int): DQN timesteps.
-    
-    Returns:
-        list: Per-ticker results.
-        dict: Aggregated average metrics.
     """
     logging.info(f"--- Starting Multi-Stock Test ({model_type}) for {tickers} ---")
-    
+
     all_results = []
     all_metrics = []
-    
+
     for ticker in tickers:
         logging.info(f"Processing {ticker}...")
         try:
@@ -160,25 +199,21 @@ def run_multi_stock_test(tickers, period="5y", train_window=365, test_window=90,
         except Exception as e:
             logging.warning(f"Failed for {ticker}: {e}")
             all_results.append({
-                'ticker': ticker,
-                'metrics': {},
-                'baseline_metrics': {},
-                'training_details': {},
-                'num_trades': 0,
-                'error': str(e)
+                'ticker': ticker, 'metrics': {}, 'baseline_metrics': {},
+                'training_details': {}, 'num_trades': 0, 'error': str(e)
             })
-    
+
     # Aggregate average metrics
     avg_metrics = {}
     if all_metrics:
-        metric_keys = ['Total_Trades', 'Win_Rate', 'Avg_PnL', 'Sharpe_Ratio', 
+        metric_keys = ['Total_Trades', 'Win_Rate', 'Avg_PnL', 'Sharpe_Ratio',
                        'Sortino_Ratio', 'Max_Drawdown', 'Calmar_Ratio', 'Profit_Factor',
                        'Total_Return']
         for key in metric_keys:
             values = [m.get(key, 0) for m in all_metrics if m.get(key) is not None]
             if values:
                 avg_metrics[key] = np.mean(values)
-    
+
     return all_results, avg_metrics
 
 
@@ -186,13 +221,7 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
     """
     Trains the model on all available historical data up to yesterday,
     and makes a prediction for TOMORROW based on TODAY's features.
-
-    Args:
-        ticker (str): Stock ticker symbol.
-        model_type (str): 'ML' or 'RL'.
-
-    Returns:
-        dict: Prediction results.
+    For RL: uses saved model if available for instant prediction.
     """
     df = load_data(ticker, period="2y")
     if df.empty:
@@ -223,7 +252,7 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
     df_live['SMA_10_Ratio'] = df_live['Close'] / df_live['SMA_10']
     df_live['SMA_50_Ratio'] = df_live['Close'] / df_live['SMA_50']
 
-    feature_cols = ['Returns', 'Volatility_10', 'RSI', 'Body_Ratio', 'Upper_Wick', 
+    feature_cols = ['Returns', 'Volatility_10', 'RSI', 'Body_Ratio', 'Upper_Wick',
                     'Lower_Wick', 'SMA_10_Ratio', 'SMA_50_Ratio']
     df_live = df_live.dropna(subset=feature_cols)
 
@@ -232,8 +261,6 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
 
     # Training set (all except today)
     train_df = df_live.iloc[:-1].copy()
-
-    # Today's features (last row)
     today_df = df_live.iloc[[-1]].copy()
 
     # Scale
@@ -243,12 +270,14 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
     today_df[feature_cols] = scaler.transform(today_df[feature_cols])
 
     if model_type == "RL":
-        from rl_agent import train_rl_agent, get_rl_live_prediction
+        from rl_agent import load_rl_model, train_rl_agent, get_rl_live_prediction
 
-        # Train RL agent
-        model, stats = train_rl_agent(train_df, feature_cols, total_timesteps=10000)
+        # Try loading saved model first (instant prediction)
+        model = load_rl_model()
+        if model is None:
+            # No saved model — train a quick one
+            model, stats = train_rl_agent(train_df, feature_cols, total_timesteps=5000)
 
-        # Predict
         result = get_rl_live_prediction(model, today_df.iloc[0], feature_cols, in_position=False)
 
         action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}
@@ -279,12 +308,10 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
 
 
 if __name__ == "__main__":
-    # Test ML pipeline
     results = run_pipeline(model_type="ML")
     if results:
         print(f"ML Pipeline successful. Trades: {len(results['trades'])}")
 
-    # Test RL pipeline
     results_rl = run_pipeline(model_type="RL", rl_timesteps=5000)
     if results_rl:
         print(f"RL Pipeline successful. Trades: {len(results_rl['trades'])}")

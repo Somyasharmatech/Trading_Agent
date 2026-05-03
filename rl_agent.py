@@ -2,10 +2,10 @@
 rl_agent.py — DQN Reinforcement Learning Agent Wrapper
 
 Uses stable-baselines3 DQN to train an agent on the custom TradingEnv.
-Provides training with logging, prediction, and live signal generation.
-Default timesteps: 30,000 for serious training.
+Supports model saving/loading for persistence (train once, predict many times).
 """
 
+import os
 import logging
 import numpy as np
 import pandas as pd
@@ -14,6 +14,10 @@ from stable_baselines3.common.callbacks import BaseCallback
 from rl_env import TradingEnv, COOLDOWN_PERIOD
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Default model save path (relative to project directory)
+MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_MODEL_PATH = os.path.join(MODEL_DIR, "rl_model")
 
 
 class TrainingLogger(BaseCallback):
@@ -63,18 +67,20 @@ class TrainingLogger(BaseCallback):
         }
 
 
-def train_rl_agent(df, feature_cols, total_timesteps=30000,
-                   stop_loss=0.02, take_profit=0.03, trans_cost=0.001):
+def train_rl_agent(df, feature_cols, total_timesteps=10000,
+                   stop_loss=0.02, take_profit=0.03, trans_cost=0.001,
+                   save_path=None):
     """
-    Trains a DQN agent on the trading environment.
+    Trains a DQN agent on the trading environment and saves the model.
 
     Args:
         df (pd.DataFrame): Feature-engineered dataframe with OHLCV + features.
         feature_cols (list): List of feature column names.
-        total_timesteps (int): Number of training timesteps for DQN (default 30,000).
+        total_timesteps (int): Number of training timesteps for DQN.
         stop_loss (float): Stop-loss threshold.
         take_profit (float): Take-profit threshold.
         trans_cost (float): Transaction cost per trade.
+        save_path (str): Path to save the trained model (without .zip extension).
 
     Returns:
         DQN: Trained DQN model.
@@ -115,10 +121,47 @@ def train_rl_agent(df, feature_cols, total_timesteps=30000,
     training_stats['total_timesteps'] = total_timesteps
     training_stats['algorithm'] = 'DQN'
 
+    # Save model
+    if save_path is None:
+        save_path = DEFAULT_MODEL_PATH
+    model.save(save_path)
+    logging.info(f"Model saved to {save_path}.zip")
+
     logging.info(f"DQN Training complete. Episodes: {training_stats['total_episodes']}, "
                  f"Avg Reward: {training_stats['avg_reward']:.4f}")
 
     return model, training_stats
+
+
+def load_rl_model(model_path=None):
+    """
+    Loads a previously saved DQN model from disk.
+
+    Args:
+        model_path (str): Path to the saved model (without .zip extension).
+
+    Returns:
+        DQN: Loaded DQN model, or None if file doesn't exist.
+    """
+    if model_path is None:
+        model_path = DEFAULT_MODEL_PATH
+
+    zip_path = model_path + ".zip"
+    if os.path.exists(zip_path):
+        logging.info(f"Loading saved RL model from {zip_path}...")
+        model = DQN.load(model_path)
+        logging.info("RL model loaded successfully.")
+        return model
+    else:
+        logging.warning(f"No saved model found at {zip_path}.")
+        return None
+
+
+def is_model_saved(model_path=None):
+    """Check if a trained model exists on disk."""
+    if model_path is None:
+        model_path = DEFAULT_MODEL_PATH
+    return os.path.exists(model_path + ".zip")
 
 
 def predict_rl_actions(model, df, feature_cols):
@@ -222,9 +265,15 @@ if __name__ == "__main__":
     df = load_data("AAPL", "1y")
     df_feat, feat_cols = engineer_features(df)
 
+    # Train and save
     model, stats = train_rl_agent(df_feat, feat_cols, total_timesteps=5000)
     print(f"\nTraining Stats: {stats}")
+    print(f"Model saved: {is_model_saved()}")
 
-    actions = predict_rl_actions(model, df_feat, feat_cols)
-    print(f"\nAction distribution: HOLD={actions.count(0)}, BUY={actions.count(1)}, SELL={actions.count(2)}")
+    # Load and predict
+    loaded_model = load_rl_model()
+    if loaded_model:
+        actions = predict_rl_actions(loaded_model, df_feat, feat_cols)
+        print(f"\nAction distribution: HOLD={actions.count(0)}, BUY={actions.count(1)}, SELL={actions.count(2)}")
+
     print("RL Agent module ready.")
