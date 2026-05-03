@@ -1,124 +1,218 @@
+"""
+main.py — Main Pipeline Orchestrator
+
+Supports both ML (RandomForest) and RL (DQN) pipelines.
+Routes execution based on model_type parameter.
+"""
+
 import logging
 import pandas as pd
 from data_loader import load_data
 from features import engineer_features
-from evaluation import walk_forward_analysis, monte_carlo_simulation
+from evaluation import walk_forward_analysis, walk_forward_analysis_rl, monte_carlo_simulation
 from metrics import get_baseline_performance, compute_daily_equity
 from model import train_model, predict
 
-def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90):
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
+                 model_type="ML", rl_timesteps=10000):
     """
-    Runs the complete end-to-end trading pipeline (Backtest).
+    Runs the complete end-to-end trading pipeline.
+
+    Args:
+        ticker (str): Stock ticker symbol.
+        period (str): Data period (e.g., '5y').
+        train_window (int): Walk-forward train window in days.
+        test_window (int): Walk-forward test window in days.
+        model_type (str): 'ML' for RandomForest, 'RL' for DQN agent.
+        rl_timesteps (int): DQN training timesteps (only used when model_type='RL').
+
+    Returns:
+        dict: Results including trades, metrics, equity curves, and training details.
     """
-    logging.info(f"--- Starting Pipeline for {ticker} ---")
-    
+    logging.info(f"--- Starting {model_type} Pipeline for {ticker} ---")
+
     # 1. Load Data
     df = load_data(ticker, period)
     if df.empty:
         logging.error("Failed to load data. Exiting pipeline.")
         return None
-        
+
     # 2. Engineer Features
     df_features, feature_cols = engineer_features(df)
-    
-    # 3. Baseline Performance
+
+    # 3. Baseline Performance (Buy & Hold)
     baseline_metrics, baseline_equity = get_baseline_performance(df_features)
-    
-    # 4. Walk-Forward Analysis (Simulating real-world deployment)
-    metrics, trades_df = walk_forward_analysis(
-        df_features, 
-        feature_cols, 
-        train_window_days=train_window, 
-        test_window_days=test_window
-    )
-    
+
+    # 4. Run Walk-Forward Analysis based on model type
+    training_details = {}
+
+    if model_type == "RL":
+        metrics, trades_df, rl_training_stats = walk_forward_analysis_rl(
+            df_features, feature_cols,
+            train_window_days=train_window,
+            test_window_days=test_window,
+            total_timesteps=rl_timesteps
+        )
+
+        training_details = {
+            'model_type': 'RL',
+            'algorithm': 'DQN',
+            'timesteps': rl_timesteps,
+            'total_episodes': rl_training_stats.get('total_episodes', 0),
+            'avg_reward': rl_training_stats.get('avg_reward', 0.0),
+            'best_reward': rl_training_stats.get('best_reward', 0.0),
+            'worst_reward': rl_training_stats.get('worst_reward', 0.0),
+            'reward_formula': 'PnL × RR_bonus - overtrading - holding - cost'
+        }
+
+    else:  # ML (default)
+        metrics, trades_df = walk_forward_analysis(
+            df_features, feature_cols,
+            train_window_days=train_window,
+            test_window_days=test_window
+        )
+
+        # Calculate ML accuracy from walk-forward
+        if not trades_df.empty:
+            winning = len(trades_df[trades_df['Net_PnL'] > 0])
+            total = len(trades_df)
+            accuracy_approx = winning / total if total > 0 else 0
+        else:
+            accuracy_approx = 0
+
+        training_details = {
+            'model_type': 'ML',
+            'algorithm': 'RandomForest',
+            'n_estimators': 100,
+            'max_depth': 5,
+            'accuracy': accuracy_approx,
+        }
+
     if trades_df.empty:
         logging.warning("No trades executed during Walk-Forward Analysis.")
         return None
-        
+
     # 5. Monte Carlo Simulation
     mc_results = monte_carlo_simulation(trades_df)
     metrics.update(mc_results)
-    
+
     # 6. Daily Equity Curve
     daily_equity = compute_daily_equity(df_features, trades_df)
-    
+
     results = {
         'df': df_features,
         'trades': trades_df,
         'metrics': metrics,
         'baseline_metrics': baseline_metrics,
         'daily_equity': daily_equity,
-        'baseline_equity': baseline_equity
+        'baseline_equity': baseline_equity,
+        'training_details': training_details,
     }
-    
+
     return results
 
-def get_live_prediction(ticker="AAPL"):
+
+def get_live_prediction(ticker="AAPL", model_type="ML"):
     """
     Trains the model on all available historical data up to yesterday,
     and makes a prediction for TOMORROW based on TODAY's features.
+
+    Args:
+        ticker (str): Stock ticker symbol.
+        model_type (str): 'ML' or 'RL'.
+
+    Returns:
+        dict: Prediction results.
     """
     df = load_data(ticker, period="2y")
     if df.empty:
         return None
-        
+
     df_live = df.copy()
     df_live['Returns'] = df_live['Close'].pct_change()
     df_live['Volatility_10'] = df_live['Returns'].rolling(window=10).std()
-    
+
     high_low_diff = df_live['High'] - df_live['Low']
-    high_low_diff = high_low_diff.replace(0, pd.NA) 
-    
+    high_low_diff = high_low_diff.replace(0, pd.NA)
+
     df_live['Body_Ratio'] = (df_live['Close'] - df_live['Open']) / high_low_diff
     df_live['Upper_Wick'] = (df_live['High'] - df_live[['Open', 'Close']].max(axis=1)) / high_low_diff
     df_live['Lower_Wick'] = (df_live[['Open', 'Close']].min(axis=1) - df_live['Low']) / high_low_diff
-    
+
     df_live['Body_Ratio'] = df_live['Body_Ratio'].fillna(0)
     df_live['Upper_Wick'] = df_live['Upper_Wick'].fillna(0)
     df_live['Lower_Wick'] = df_live['Lower_Wick'].fillna(0)
-    
+
     df_live['SMA_10'] = df_live['Close'].rolling(window=10).mean()
     df_live['SMA_50'] = df_live['Close'].rolling(window=50).mean()
-    
+
     df_live['SMA_10_Ratio'] = df_live['Close'] / df_live['SMA_10']
     df_live['SMA_50_Ratio'] = df_live['Close'] / df_live['SMA_50']
-    
+
     feature_cols = ['Returns', 'Volatility_10', 'Body_Ratio', 'Upper_Wick', 'Lower_Wick', 'SMA_10_Ratio', 'SMA_50_Ratio']
     df_live = df_live.dropna(subset=feature_cols)
-    
+
     df_live['Next_Close'] = df_live['Close'].shift(-1)
     df_live['Target'] = (df_live['Next_Close'] > df_live['Close']).astype(int)
-    
+
     # Training set (all except today)
     train_df = df_live.iloc[:-1].copy()
-    
+
     # Today's features (last row)
     today_df = df_live.iloc[[-1]].copy()
-    
+
     # Scale
     from sklearn.preprocessing import StandardScaler
     scaler = StandardScaler()
     train_df[feature_cols] = scaler.fit_transform(train_df[feature_cols])
     today_df[feature_cols] = scaler.transform(today_df[feature_cols])
-    
-    # Train
-    model = train_model(train_df, feature_cols)
-    
-    # Predict
-    preds, probs = predict(model, today_df, feature_cols)
-    
-    prediction = "BUY" if preds[0] == 1 else "SELL / AVOID"
-    confidence = probs[0] if preds[0] == 1 else 1 - probs[0]
-    
-    return {
-        'prediction': prediction,
-        'confidence': confidence,
-        'latest_close': today_df['Close'].iloc[0],
-        'date': today_df.index[0].strftime('%Y-%m-%d')
-    }
+
+    if model_type == "RL":
+        from rl_agent import train_rl_agent, get_rl_live_prediction
+
+        # Train RL agent
+        model, stats = train_rl_agent(train_df, feature_cols, total_timesteps=5000)
+
+        # Predict
+        result = get_rl_live_prediction(model, today_df.iloc[0], feature_cols, in_position=False)
+
+        action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}
+        return {
+            'prediction': result['action_name'],
+            'confidence': None,  # RL doesn't have confidence like ML
+            'latest_close': today_df['Close'].iloc[0],
+            'date': today_df.index[0].strftime('%Y-%m-%d'),
+            'model_type': 'RL (DQN)',
+            'emoji': action_emoji.get(result['action_name'], '⚪')
+        }
+
+    else:  # ML
+        model = train_model(train_df, feature_cols)
+        preds, probs = predict(model, today_df, feature_cols)
+
+        prediction = "BUY" if preds[0] == 1 else "SELL / AVOID"
+        confidence = probs[0] if preds[0] == 1 else 1 - probs[0]
+
+        return {
+            'prediction': prediction,
+            'confidence': confidence,
+            'latest_close': today_df['Close'].iloc[0],
+            'date': today_df.index[0].strftime('%Y-%m-%d'),
+            'model_type': 'ML (RandomForest)',
+            'emoji': '🟢' if preds[0] == 1 else '🔴'
+        }
+
 
 if __name__ == "__main__":
-    results = run_pipeline()
+    # Test ML pipeline
+    results = run_pipeline(model_type="ML")
     if results:
-        print("Pipeline successful.")
+        print(f"ML Pipeline successful. Trades: {len(results['trades'])}")
+
+    # Test RL pipeline
+    results_rl = run_pipeline(model_type="RL", rl_timesteps=1000)
+    if results_rl:
+        print(f"RL Pipeline successful. Trades: {len(results_rl['trades'])}")

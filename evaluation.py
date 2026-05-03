@@ -1,23 +1,28 @@
+"""
+evaluation.py — Walk-Forward Analysis and Monte Carlo Simulation
+
+Supports both ML (RandomForest) and RL (DQN) walk-forward evaluation.
+Train → Test → Shift window → Repeat
+"""
+
 import pandas as pd
 import numpy as np
 import logging
 from model import train_model, predict
-from trading_engine import simulate_trading
+from trading_engine import simulate_trading, simulate_trading_rl
 from metrics import calculate_metrics
 
 def walk_forward_analysis(df, feature_cols, train_window_days=365, test_window_days=90):
     """
-    Performs walk-forward analysis.
+    Performs walk-forward analysis for ML model.
     Slides a window over the data: trains on train_window, tests on test_window.
     """
-    logging.info(f"Starting Walk-Forward Analysis (Train: {train_window_days}d, Test: {test_window_days}d)")
+    logging.info(f"Starting ML Walk-Forward Analysis (Train: {train_window_days}d, Test: {test_window_days}d)")
     
     all_trades = []
     
     start_idx = 0
     while True:
-        # Approximate rows by trading days (252 days per year approx, so train=252, test=63)
-        # We will use date offsets instead for accurate calendar days
         start_date = df.index[start_idx]
         train_end_date = start_date + pd.Timedelta(days=train_window_days)
         test_end_date = train_end_date + pd.Timedelta(days=test_window_days)
@@ -34,7 +39,7 @@ def walk_forward_analysis(df, feature_cols, train_window_days=365, test_window_d
         if len(train_data) < 50 or len(test_data) < 5:
             break
             
-        logging.info(f"Window: Train {start_date.date()} to {train_end_date.date()}, Test {train_end_date.date()} to {test_end_date.date()}")
+        logging.info(f"ML Window: Train {start_date.date()} to {train_end_date.date()}, Test {train_end_date.date()} to {test_end_date.date()}")
         
         # Train model
         model = train_model(train_data, feature_cols)
@@ -49,7 +54,6 @@ def walk_forward_analysis(df, feature_cols, train_window_days=365, test_window_d
             all_trades.append(trades_df)
             
         # Move window forward by test_window_days
-        # Find the index of the first date >= train_end_date
         next_start_idx = np.searchsorted(df.index, train_end_date)
         start_idx = next_start_idx
         
@@ -59,11 +63,92 @@ def walk_forward_analysis(df, feature_cols, train_window_days=365, test_window_d
     if all_trades:
         combined_trades = pd.concat(all_trades, ignore_index=True)
         metrics, _ = calculate_metrics(combined_trades)
-        logging.info("Walk-Forward Analysis Completed.")
+        logging.info("ML Walk-Forward Analysis Completed.")
         return metrics, combined_trades
     else:
-        logging.warning("Walk-Forward Analysis generated no trades.")
+        logging.warning("ML Walk-Forward Analysis generated no trades.")
         return {}, pd.DataFrame()
+
+
+def walk_forward_analysis_rl(df, feature_cols, train_window_days=365, test_window_days=90,
+                              total_timesteps=10000):
+    """
+    Performs walk-forward analysis for RL agent (DQN).
+    Same sliding window logic: Train DQN → Predict actions → Simulate → Shift.
+
+    Args:
+        df (pd.DataFrame): Feature-engineered dataframe.
+        feature_cols (list): Feature column names.
+        train_window_days (int): Training window in calendar days.
+        test_window_days (int): Testing window in calendar days.
+        total_timesteps (int): DQN training timesteps per window.
+
+    Returns:
+        dict: Aggregated performance metrics.
+        pd.DataFrame: Combined trades from all windows.
+        dict: Training statistics from the last window (for UI display).
+    """
+    # Import here to avoid circular imports
+    from rl_agent import train_rl_agent, predict_rl_actions
+
+    logging.info(f"Starting RL Walk-Forward Analysis (Train: {train_window_days}d, Test: {test_window_days}d, Timesteps: {total_timesteps})")
+
+    all_trades = []
+    last_training_stats = {}
+
+    start_idx = 0
+    window_count = 0
+
+    while True:
+        start_date = df.index[start_idx]
+        train_end_date = start_date + pd.Timedelta(days=train_window_days)
+        test_end_date = train_end_date + pd.Timedelta(days=test_window_days)
+
+        if test_end_date > df.index[-1]:
+            test_end_date = df.index[-1]
+            if train_end_date >= test_end_date:
+                break
+
+        train_data = df[(df.index >= start_date) & (df.index < train_end_date)]
+        test_data = df[(df.index >= train_end_date) & (df.index <= test_end_date)]
+
+        if len(train_data) < 50 or len(test_data) < 5:
+            break
+
+        window_count += 1
+        logging.info(f"RL Window {window_count}: Train {start_date.date()} to {train_end_date.date()}, "
+                     f"Test {train_end_date.date()} to {test_end_date.date()}")
+
+        # Train DQN agent on training window
+        model, training_stats = train_rl_agent(train_data, feature_cols,
+                                                total_timesteps=total_timesteps)
+        last_training_stats = training_stats
+
+        # Generate actions on test data
+        actions = predict_rl_actions(model, test_data, feature_cols)
+
+        # Simulate trading with RL actions
+        trades_df = simulate_trading_rl(test_data, actions)
+
+        if not trades_df.empty:
+            all_trades.append(trades_df)
+
+        # Move window forward
+        next_start_idx = np.searchsorted(df.index, train_end_date)
+        start_idx = next_start_idx
+
+        if start_idx >= len(df) or test_end_date == df.index[-1]:
+            break
+
+    if all_trades:
+        combined_trades = pd.concat(all_trades, ignore_index=True)
+        metrics, _ = calculate_metrics(combined_trades)
+        logging.info(f"RL Walk-Forward Analysis Completed. Windows: {window_count}")
+        return metrics, combined_trades, last_training_stats
+    else:
+        logging.warning("RL Walk-Forward Analysis generated no trades.")
+        return {}, pd.DataFrame(), last_training_stats
+
 
 def monte_carlo_simulation(trades_df, num_simulations=100, initial_capital=100000):
     """
@@ -79,8 +164,7 @@ def monte_carlo_simulation(trades_df, num_simulations=100, initial_capital=10000
     max_drawdowns = []
     
     for _ in range(num_simulations):
-        # Sample with replacement or shuffle? Usually, we just shuffle the actual trades 
-        # or sample with replacement to simulate different paths. Let's sample with replacement.
+        # Sample with replacement to simulate different paths
         simulated_returns = np.random.choice(returns, size=len(returns), replace=True)
         
         equity_curve = initial_capital * (1 + simulated_returns).cumprod()

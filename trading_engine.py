@@ -1,11 +1,19 @@
+"""
+trading_engine.py — Trade Simulation Engine
+
+Supports both ML (prediction-based) and RL (action-based) trading simulation
+with SL/TP logic, transaction costs, slippage, and PDF-aligned reward calculation.
+"""
+
 import pandas as pd
 import logging
+
 
 def simulate_trading(df, preds, probs, conf_threshold=0.55, 
                     stop_loss=-0.02, take_profit=0.03, 
                     trans_cost=0.001, slippage=0.0005):
     """
-    Simulates trading realistically with risk controls, transaction costs, and logging.
+    Simulates trading for ML model (prediction-based).
     
     Args:
         df (pd.DataFrame): Dataframe with OHLC prices.
@@ -21,13 +29,14 @@ def simulate_trading(df, preds, probs, conf_threshold=0.55,
         pd.DataFrame: Trade history.
     """
     
-    logging.info("Starting trading simulation...")
+    logging.info("Starting ML trading simulation...")
     trades = []
     
     in_position = False
     entry_price = 0.0
     entry_date = None
     entry_idx = 0
+    trade_count = 0
     
     # Costs applied on entry and exit
     total_friction = trans_cost + slippage
@@ -70,14 +79,15 @@ def simulate_trading(df, preds, probs, conf_threshold=0.55,
                 net_pnl = (actual_exit_price - entry_price) / entry_price
                 
                 trade_duration = i - entry_idx
+                trade_count += 1
                 
-                # RL-Inspired Reward Logic
-                reward = calculate_reward(net_pnl, trade_duration, exit_reason)
+                # PDF-aligned Reward Logic
+                reward = calculate_reward(net_pnl, trade_count, trade_duration, exit_reason)
                 
                 trades.append({
                     'Entry_Date': entry_date,
                     'Exit_Date': current_date,
-                    'Entry_Price': entry_price, # Actual entry price including friction
+                    'Entry_Price': entry_price,
                     'Exit_Price': actual_exit_price,
                     'Duration': trade_duration,
                     'Raw_PnL': raw_pnl,
@@ -104,7 +114,8 @@ def simulate_trading(df, preds, probs, conf_threshold=0.55,
         actual_exit_price = last_close * (1 - total_friction)
         net_pnl = (actual_exit_price - entry_price) / entry_price
         trade_duration = len(df) - 1 - entry_idx
-        reward = calculate_reward(net_pnl, trade_duration, 'End-of-Data')
+        trade_count += 1
+        reward = calculate_reward(net_pnl, trade_count, trade_duration, 'End-of-Data')
         
         trades.append({
             'Entry_Date': entry_date,
@@ -118,26 +129,160 @@ def simulate_trading(df, preds, probs, conf_threshold=0.55,
             'Reward': reward
         })
         
-    logging.info(f"Simulation complete. Total trades: {len(trades)}")
+    logging.info(f"ML Simulation complete. Total trades: {len(trades)}")
     return pd.DataFrame(trades)
 
-def calculate_reward(pnl, duration, exit_reason):
+
+def simulate_trading_rl(df, actions, stop_loss=-0.02, take_profit=0.03,
+                        trans_cost=0.001, slippage=0.0005):
     """
-    Simplified RL-inspired reward logic.
-    Reward = Profit * Risk-Reward Factor - Penalties
+    Simulates trading for RL agent (action-based: 0=HOLD, 1=BUY, 2=SELL).
+    Enforces valid action constraints (no double buy/sell).
+
+    Args:
+        df (pd.DataFrame): Dataframe with OHLC prices.
+        actions (list): Action sequence from RL agent (0=HOLD, 1=BUY, 2=SELL).
+        stop_loss (float): Stop loss percentage (e.g., -0.02 for -2%).
+        take_profit (float): Take profit percentage (e.g., 0.03 for +3%).
+        trans_cost (float): Transaction cost per trade.
+        slippage (float): Slippage per trade.
+
+    Returns:
+        pd.DataFrame: Trade history.
     """
-    reward = pnl * 100 # Base reward scaled to percentage points (e.g. 3% -> 3.0)
-    
-    # Bonus for hitting take-profit
-    if exit_reason == 'Take-Profit':
-        reward += 1.0 
-        
-    # Penalty: Very short trades (e.g., stopped out instantly)
-    if duration <= 1 and pnl < 0:
-        reward -= 0.5
-        
-    # Penalty: Long holding without profit
-    if duration > 10 and pnl <= 0:
-        reward -= 1.0
-        
+    logging.info("Starting RL trading simulation...")
+    trades = []
+
+    in_position = False
+    entry_price = 0.0
+    entry_date = None
+    entry_idx = 0
+    trade_count = 0
+
+    total_friction = trans_cost + slippage
+
+    for i in range(len(df)):
+        current_date = df.index[i]
+        today_open = df['Open'].iloc[i]
+        today_high = df['High'].iloc[i]
+        today_low = df['Low'].iloc[i]
+        today_close = df['Close'].iloc[i]
+
+        action = actions[i]
+
+        # --- Enforce valid action constraints ---
+        if action == 1 and in_position:
+            action = 0  # Cannot BUY if already in position
+        if action == 2 and not in_position:
+            action = 0  # Cannot SELL if no position
+
+        if in_position:
+            # Check SL and TP first (before processing action)
+            highest_return = (today_high - entry_price) / entry_price
+            lowest_return = (today_low - entry_price) / entry_price
+
+            exit_reason = None
+            exit_price = 0.0
+
+            if lowest_return <= stop_loss:
+                exit_price = entry_price * (1 + stop_loss)
+                exit_reason = 'Stop-Loss'
+            elif highest_return >= take_profit:
+                exit_price = entry_price * (1 + take_profit)
+                exit_reason = 'Take-Profit'
+            elif action == 2:
+                exit_price = today_close
+                exit_reason = 'RL-Sell'
+
+            if exit_reason:
+                actual_exit_price = exit_price * (1 - total_friction)
+                raw_pnl = (exit_price - entry_price) / entry_price
+                net_pnl = (actual_exit_price - entry_price) / entry_price
+                trade_duration = i - entry_idx
+                trade_count += 1
+
+                reward = calculate_reward(net_pnl, trade_count, trade_duration, exit_reason)
+
+                trades.append({
+                    'Entry_Date': entry_date,
+                    'Exit_Date': current_date,
+                    'Entry_Price': entry_price,
+                    'Exit_Price': actual_exit_price,
+                    'Duration': trade_duration,
+                    'Raw_PnL': raw_pnl,
+                    'Net_PnL': net_pnl,
+                    'Exit_Reason': exit_reason,
+                    'Reward': reward,
+                    'Action': 'SELL'
+                })
+                in_position = False
+
+        if not in_position and action == 1:
+            # Enter position
+            entry_price = today_close * (1 + total_friction)
+            entry_date = current_date
+            entry_idx = i
+            in_position = True
+
+    # Close any open position at the end
+    if in_position:
+        last_close = df['Close'].iloc[-1]
+        actual_exit_price = last_close * (1 - total_friction)
+        net_pnl = (actual_exit_price - entry_price) / entry_price
+        trade_duration = len(df) - 1 - entry_idx
+        trade_count += 1
+        reward = calculate_reward(net_pnl, trade_count, trade_duration, 'End-of-Data')
+
+        trades.append({
+            'Entry_Date': entry_date,
+            'Exit_Date': df.index[-1],
+            'Entry_Price': entry_price,
+            'Exit_Price': actual_exit_price,
+            'Duration': trade_duration,
+            'Raw_PnL': (last_close - entry_price) / entry_price,
+            'Net_PnL': net_pnl,
+            'Exit_Reason': 'End-of-Data',
+            'Reward': reward,
+            'Action': 'END'
+        })
+
+    logging.info(f"RL Simulation complete. Total trades: {len(trades)}")
+    return pd.DataFrame(trades)
+
+
+def calculate_reward(pnl, trade_count, holding_time, exit_reason,
+                     tp=0.03, sl=0.02, trans_cost=0.001):
+    """
+    PDF-aligned reward function.
+
+    reward = (PnL × RR_bonus)
+             - overtrading_penalty
+             - holding_penalty
+             - transaction_cost
+
+    Args:
+        pnl (float): Net profit/loss of the trade.
+        trade_count (int): Total number of trades so far (for overtrading penalty).
+        holding_time (int): Duration of trade in bars.
+        exit_reason (str): How the trade was closed.
+        tp (float): Take-profit threshold.
+        sl (float): Stop-loss threshold.
+        trans_cost (float): Transaction cost.
+
+    Returns:
+        float: Calculated reward value.
+    """
+    rr_factor = tp / sl  # 1.5
+
+    # Bonus if take-profit hit, reduced bonus otherwise
+    if exit_reason == "Take-Profit":
+        rr_bonus = rr_factor
+    else:
+        rr_bonus = 0.5
+
+    reward = (pnl * rr_bonus) \
+             - (0.001 * trade_count) \
+             - (0.0005 * holding_time) \
+             - trans_cost
+
     return reward
