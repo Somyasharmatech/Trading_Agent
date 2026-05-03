@@ -2,24 +2,43 @@
 trading_engine.py — Trade Simulation Engine
 
 Supports both ML (prediction-based) and RL (action-based) trading simulation
-with SL/TP logic, transaction costs, slippage, and PDF-aligned reward calculation.
+with SL/TP logic, transaction costs, slippage, cooldown, trend filter,
+and PDF-aligned reward calculation.
 """
 
 import pandas as pd
+import numpy as np
 import logging
 
+COOLDOWN_PERIOD = 3  # Days to wait after a trade before entering again
 
-def simulate_trading(df, preds, probs, conf_threshold=0.55, 
+
+def _check_trend_bullish(df, i):
+    """Trend filter: BUY only if SMA_10 > SMA_50."""
+    if 'SMA_10' in df.columns and 'SMA_50' in df.columns:
+        return df['SMA_10'].iloc[i] > df['SMA_50'].iloc[i]
+    return True
+
+
+def _check_trend_bearish(df, i):
+    """Trend filter: SELL signals stronger when SMA_10 < SMA_50."""
+    if 'SMA_10' in df.columns and 'SMA_50' in df.columns:
+        return df['SMA_10'].iloc[i] < df['SMA_50'].iloc[i]
+    return True
+
+
+def simulate_trading(df, preds, probs, conf_threshold=0.60, 
                     stop_loss=-0.02, take_profit=0.03, 
                     trans_cost=0.001, slippage=0.0005):
     """
     Simulates trading for ML model (prediction-based).
+    Includes trend filter and cooldown period for noise reduction.
     
     Args:
         df (pd.DataFrame): Dataframe with OHLC prices.
         preds (list or np.array): Model predictions (1 for BUY, 0 for SELL).
         probs (list or np.array): Confidence probabilities for BUY.
-        conf_threshold (float): Minimum confidence to take a trade.
+        conf_threshold (float): Minimum confidence to take a trade (0.60 for noise reduction).
         stop_loss (float): Stop loss percentage (e.g., -0.02 for -2%).
         take_profit (float): Take profit percentage (e.g., 0.03 for +3%).
         trans_cost (float): Transaction cost per trade (e.g., 0.001 for 0.1%).
@@ -37,6 +56,7 @@ def simulate_trading(df, preds, probs, conf_threshold=0.55,
     entry_date = None
     entry_idx = 0
     trade_count = 0
+    cooldown_remaining = 0
     
     # Costs applied on entry and exit
     total_friction = trans_cost + slippage
@@ -47,6 +67,10 @@ def simulate_trading(df, preds, probs, conf_threshold=0.55,
         today_high = df['High'].iloc[i]
         today_low = df['Low'].iloc[i]
         today_close = df['Close'].iloc[i]
+        
+        # Decrement cooldown
+        if cooldown_remaining > 0:
+            cooldown_remaining -= 1
         
         # Signal is generated at the end of PREVIOUS day
         prev_pred = preds[i-1]
@@ -96,13 +120,15 @@ def simulate_trading(df, preds, probs, conf_threshold=0.55,
                     'Reward': reward
                 })
                 in_position = False
+                cooldown_remaining = COOLDOWN_PERIOD  # Start cooldown
                 
         else:
             # Check for entry signal
-            # Enter if model says BUY and confidence > threshold
-            if prev_pred == 1 and prev_prob >= conf_threshold:
+            # Enter if: model says BUY, confidence > threshold, not in cooldown, trend is bullish
+            if (prev_pred == 1 and prev_prob >= conf_threshold 
+                and cooldown_remaining <= 0
+                and _check_trend_bullish(df, i)):
                 # Enter at today's open
-                # Apply friction to entry price
                 entry_price = today_open * (1 + total_friction)
                 entry_date = current_date
                 entry_idx = i
@@ -137,7 +163,7 @@ def simulate_trading_rl(df, actions, stop_loss=-0.02, take_profit=0.03,
                         trans_cost=0.001, slippage=0.0005):
     """
     Simulates trading for RL agent (action-based: 0=HOLD, 1=BUY, 2=SELL).
-    Enforces valid action constraints (no double buy/sell).
+    Enforces valid action constraints, cooldown, and trend filter.
 
     Args:
         df (pd.DataFrame): Dataframe with OHLC prices.
@@ -158,6 +184,7 @@ def simulate_trading_rl(df, actions, stop_loss=-0.02, take_profit=0.03,
     entry_date = None
     entry_idx = 0
     trade_count = 0
+    cooldown_remaining = 0
 
     total_friction = trans_cost + slippage
 
@@ -168,6 +195,10 @@ def simulate_trading_rl(df, actions, stop_loss=-0.02, take_profit=0.03,
         today_low = df['Low'].iloc[i]
         today_close = df['Close'].iloc[i]
 
+        # Decrement cooldown
+        if cooldown_remaining > 0:
+            cooldown_remaining -= 1
+
         action = actions[i]
 
         # --- Enforce valid action constraints ---
@@ -175,6 +206,10 @@ def simulate_trading_rl(df, actions, stop_loss=-0.02, take_profit=0.03,
             action = 0  # Cannot BUY if already in position
         if action == 2 and not in_position:
             action = 0  # Cannot SELL if no position
+        if action == 1 and cooldown_remaining > 0:
+            action = 0  # Cannot BUY during cooldown
+        if action == 1 and not _check_trend_bullish(df, i):
+            action = 0  # Trend filter: BUY only in uptrend
 
         if in_position:
             # Check SL and TP first (before processing action)
@@ -216,6 +251,7 @@ def simulate_trading_rl(df, actions, stop_loss=-0.02, take_profit=0.03,
                     'Action': 'SELL'
                 })
                 in_position = False
+                cooldown_remaining = COOLDOWN_PERIOD
 
         if not in_position and action == 1:
             # Enter position

@@ -10,15 +10,19 @@ Features:
 - Price + Signals chart, Equity curve, Drawdown chart
 - Trade history table with CSV export
 - Training details visibility (ML accuracy / RL episodes, reward)
+- Model explanation panel
+- Performance disclaimer
+- Multi-stock testing (bonus)
 """
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from main import run_pipeline, get_live_prediction
+from main import run_pipeline, get_live_prediction, run_multi_stock_test
 
-st.set_page_config(page_title="AI Trading Agent", layout="wide")
+st.set_page_config(page_title="AI Trading Agent", layout="wide", page_icon="🤖")
 
 st.title("🤖 AI Trading Agent with Advanced Risk Logic")
 st.markdown("AI-driven trading system using **machine learning** and **reinforcement learning**, with risk-aware logic and backtesting.")
@@ -30,7 +34,7 @@ period = st.sidebar.selectbox("Data Period", options=["1y", "2y", "5y", "10y"], 
 
 st.sidebar.markdown("---")
 
-# 🔥 MODEL SELECTOR (VERY IMPORTANT)
+# 🔥 MODEL SELECTOR
 st.sidebar.header("🧠 Model Selection")
 model_type = st.sidebar.radio(
     "Model Type",
@@ -43,15 +47,60 @@ model_type = st.sidebar.radio(
 model_key = "ML" if model_type == "ML Model" else "RL"
 
 # RL-specific controls
-rl_timesteps = 10000
+rl_timesteps = 30000
 if model_key == "RL":
-    rl_timesteps = st.sidebar.slider("DQN Training Timesteps", 5000, 50000, 10000, step=1000,
-                                      help="More timesteps = better learning but slower training.")
+    rl_timesteps = st.sidebar.slider("DQN Training Timesteps", 5000, 50000, 30000, step=5000,
+                                      help="More timesteps = better learning but slower training. Recommended: 30,000+")
 
 st.sidebar.markdown("---")
 st.sidebar.header("📐 Walk-Forward Settings")
 train_window = st.sidebar.slider("Train Window (days)", 100, 1000, 365)
 test_window = st.sidebar.slider("Test Window (days)", 30, 365, 90)
+
+# --- MODEL EXPLANATION PANEL ---
+with st.expander("🧠 Model Explanation — How This System Works", expanded=False):
+    st.markdown("""
+    ### How This Trading System Works
+
+    This system uses **two AI approaches** to learn trading decisions from historical stock data:
+
+    **📊 Data Pipeline:**
+    - Historical stock data is fetched from Yahoo Finance via `yfinance`
+    - Advanced features are engineered: **Returns**, **Volatility**, **RSI**, **Candle Structure** (body ratio, wicks), **SMA indicators**
+    - Data is normalized using StandardScaler to ensure fair feature weighting
+
+    **🤖 ML Model (RandomForest):**
+    - A **RandomForestClassifier** (100 estimators, max depth 5) learns to predict next-day price direction
+    - Prediction confidence must exceed **60%** to trigger a trade (noise reduction)
+    - Best for: Stable signals based on feature patterns
+
+    **🧠 RL Agent (DQN — Deep Q-Network):**
+    - A **reinforcement learning agent** learns BUY/SELL/HOLD actions through trial and error
+    - The agent receives **rewards** based on: `PnL × Risk-Reward Bonus - Overtrading Penalty - Holding Penalty - Transaction Cost`
+    - State includes **9 features + position state** (whether currently holding)
+    - Best for: Adaptive behavior that optimizes for cumulative reward
+
+    **🛡️ Risk Management:**
+    - **Stop-Loss:** -2% (automatic exit to limit losses)
+    - **Take-Profit:** +3% (automatic exit to lock in gains)
+    - **Transaction Cost:** 0.1% per trade (realistic friction)
+    - **3-Day Cooldown:** Prevents overtrading after each exit
+    - **Trend Filter:** BUY only allowed when SMA_10 > SMA_50 (uptrend confirmation)
+
+    **📈 Evaluation:**
+    - **Walk-Forward Analysis:** Train on 1 year → Test on 3 months → Shift → Repeat
+    - **Monte Carlo Simulation:** Shuffles trade order 100 times to test robustness
+    - **Metrics:** Sharpe, Sortino, Max Drawdown, Calmar, Profit Factor, Win Rate
+    """)
+
+# --- PERFORMANCE DISCLAIMER ---
+st.info(
+    "⚠️ **Disclaimer:** Financial markets are noisy and difficult to predict. "
+    "This system focuses on learning trading behavior and risk management rather than guaranteed profits. "
+    "Past performance does not guarantee future results."
+)
+
+st.markdown("---")
 
 # --- LIVE PREDICTION ---
 st.markdown("### 🔮 Live Prediction for Next Trading Day")
@@ -64,16 +113,14 @@ if live_pred:
     emoji = live_pred.get('emoji', '⚪')
 
     if live_pred.get('confidence') is not None:
-        # ML prediction with confidence
-        st.info(
+        st.success(
             f"**{ticker} ({live_pred['date']}) Last Close:** ${live_pred['latest_close']:.2f}  |  "
             f"**Prediction:** {emoji} {live_pred['prediction']}  |  "
             f"**Confidence:** {live_pred['confidence']:.2%}  |  "
             f"**Model:** {live_pred['model_type']}"
         )
     else:
-        # RL prediction (no confidence score)
-        st.info(
+        st.success(
             f"**{ticker} ({live_pred['date']}) Last Close:** ${live_pred['latest_close']:.2f}  |  "
             f"**Action:** {emoji} {live_pred['prediction']}  |  "
             f"**Model:** {live_pred['model_type']}"
@@ -83,13 +130,21 @@ else:
 
 st.markdown("---")
 
-# --- MAIN EXECUTION ---
-if st.sidebar.button("🚀 Run Historical Simulation", type="primary"):
+# --- MAIN SIMULATION ---
+run_col, multi_col = st.columns(2)
 
-    # Loading State
+with run_col:
+    run_sim = st.button("🚀 Run Historical Simulation", type="primary", use_container_width=True)
+
+with multi_col:
+    run_multi = st.button("🌍 Multi-Stock Test (5 Tickers)", use_container_width=True)
+
+
+# --- SINGLE STOCK SIMULATION ---
+if run_sim:
     with st.status(f"Running {model_type} simulation...", expanded=True) as status:
         st.write("📥 Fetching data...")
-        st.write(f"🧠 Training {'DQN agent' if model_key == 'RL' else 'RandomForest model'}...")
+        st.write(f"🧠 Training {'DQN agent (' + str(rl_timesteps) + ' timesteps)' if model_key == 'RL' else 'RandomForest model'}...")
         st.write("📊 Backtesting strategy (Walk-Forward)...")
         st.write("📈 Calculating metrics...")
 
@@ -139,7 +194,6 @@ if st.sidebar.button("🚀 Run Historical Simulation", type="primary"):
         c2.metric("Buy & Hold Return", f"{bh_return:.2%}")
         c3.metric("Outperformance", f"{diff:.2%}", delta=f"{diff:.2%}")
 
-        # Additional baseline comparison
         bc1, bc2, bc3, bc4 = st.columns(4)
         bc1.metric("Strategy Sharpe", f"{metrics.get('Sharpe_Ratio', 0):.2f}")
         bc2.metric("B&H Sharpe", f"{baseline.get('Sharpe_Ratio', 0):.2f}")
@@ -167,9 +221,11 @@ if st.sidebar.button("🚀 Run Historical Simulation", type="primary"):
             - **Average Episode Reward:** {training_details.get('avg_reward', 0):.4f}
             - **Best Episode Reward:** {training_details.get('best_reward', 0):.4f}
             - **Worst Episode Reward:** {training_details.get('worst_reward', 0):.4f}
+            - **Avg Episode Length:** {training_details.get('avg_episode_length', 0):.0f} steps
             - **Reward Formula:** `PnL × RR_bonus - overtrading_penalty - holding_penalty - cost`
             - **Actions:** 0=HOLD, 1=BUY, 2=SELL
-            - **State:** Returns, Volatility, Body Ratio, Wicks, SMA Ratios, Position
+            - **State:** Returns, Volatility, RSI, Body Ratio, Wicks, SMA Ratios, Position
+            - **Constraints:** Cooldown (3 days), Trend Filter (SMA_10 > SMA_50)
             """)
 
         else:  # ML
@@ -177,18 +233,20 @@ if st.sidebar.button("🚀 Run Historical Simulation", type="primary"):
             t1.metric("Algorithm", "RandomForest")
             t2.metric("Estimators", training_details.get('n_estimators', 100))
             t3.metric("Max Depth", training_details.get('max_depth', 5))
-            t4.metric("Win Rate (Approx Accuracy)", f"{training_details.get('accuracy', 0):.2%}")
+            t4.metric("Win Rate (Approx)", f"{training_details.get('accuracy', 0):.2%}")
 
             st.markdown(f"""
             **ML Model Configuration:**
             - **Model:** RandomForestClassifier
             - **n_estimators:** {training_details.get('n_estimators', 100)}
             - **max_depth:** {training_details.get('max_depth', 5)}
+            - **Confidence Threshold:** 60% (only trades above this)
             - **Features Used:**
-              - Returns, 10-day Volatility
+              - Returns, 10-day Volatility, RSI (14-period)
               - Candle structure (Body Ratio, Upper Wick, Lower Wick)
               - SMA indicators (SMA_10 ratio, SMA_50 ratio)
             - **Dataset Size:** {len(df)} trading days
+            - **Constraints:** Cooldown (3 days), Trend Filter (SMA_10 > SMA_50)
             - **Validation:** Walk-Forward Analysis (Train: {train_window}d, Test: {test_window}d)
             """)
 
@@ -287,7 +345,6 @@ if st.sidebar.button("🚀 Run Historical Simulation", type="primary"):
 
             st.dataframe(hist_df, use_container_width=True)
 
-            # Downloadable CSV
             csv = hist_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Download Trade History (CSV)",
@@ -308,3 +365,54 @@ if st.sidebar.button("🚀 Run Historical Simulation", type="primary"):
             mc2.metric("Capital Std Dev", f"${metrics.get('MC_Final_Capital_Std', 0):,.0f}")
             mc3.metric("Worst Drawdown", f"{metrics.get('MC_Max_Drawdown_Worst', 0):.2%}")
             mc4.metric("Win Probability", f"{metrics.get('MC_Win_Probability', 0):.2%}")
+
+
+# --- MULTI-STOCK TESTING ---
+if run_multi:
+    multi_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"]
+    
+    with st.status(f"Running {model_type} on {len(multi_tickers)} tickers...", expanded=True) as status:
+        for t in multi_tickers:
+            st.write(f"📊 Processing {t}...")
+        
+        all_results, avg_metrics = run_multi_stock_test(
+            tickers=multi_tickers,
+            period=period,
+            train_window=train_window,
+            test_window=test_window,
+            model_type=model_key,
+            rl_timesteps=rl_timesteps
+        )
+        
+        status.update(label="✅ Multi-Stock Test Complete!", state="complete", expanded=False)
+    
+    st.subheader(f"🌍 Multi-Stock Test Results ({model_type})")
+    
+    # Average metrics
+    if avg_metrics:
+        st.markdown("#### 📊 Average Performance Across All Tickers")
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Avg Total Trades", f"{avg_metrics.get('Total_Trades', 0):.0f}")
+        a2.metric("Avg Win Rate", f"{avg_metrics.get('Win_Rate', 0):.2%}")
+        a3.metric("Avg Return", f"{avg_metrics.get('Total_Return', 0):.2%}")
+        a4.metric("Avg Sharpe", f"{avg_metrics.get('Sharpe_Ratio', 0):.2f}")
+    
+    # Per-ticker breakdown
+    st.markdown("#### 📋 Per-Ticker Breakdown")
+    
+    table_data = []
+    for r in all_results:
+        m = r.get('metrics', {})
+        bm = r.get('baseline_metrics', {})
+        table_data.append({
+            'Ticker': r['ticker'],
+            'Trades': r.get('num_trades', 0),
+            'Strategy Return': f"{m.get('Total_Return', 0):.2%}" if m else "N/A",
+            'B&H Return': f"{bm.get('Total_Return', 0):.2%}" if bm else "N/A",
+            'Win Rate': f"{m.get('Win_Rate', 0):.2%}" if m else "N/A",
+            'Sharpe': f"{m.get('Sharpe_Ratio', 0):.2f}" if m else "N/A",
+            'Max DD': f"{m.get('Max_Drawdown', 0):.2%}" if m else "N/A",
+            'Status': '✅' if r.get('num_trades', 0) > 0 else '❌'
+        })
+    
+    st.dataframe(pd.DataFrame(table_data), use_container_width=True)

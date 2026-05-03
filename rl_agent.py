@@ -3,6 +3,7 @@ rl_agent.py — DQN Reinforcement Learning Agent Wrapper
 
 Uses stable-baselines3 DQN to train an agent on the custom TradingEnv.
 Provides training with logging, prediction, and live signal generation.
+Default timesteps: 30,000 for serious training.
 """
 
 import logging
@@ -10,7 +11,7 @@ import numpy as np
 import pandas as pd
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback
-from rl_env import TradingEnv
+from rl_env import TradingEnv, COOLDOWN_PERIOD
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -62,7 +63,7 @@ class TrainingLogger(BaseCallback):
         }
 
 
-def train_rl_agent(df, feature_cols, total_timesteps=10000,
+def train_rl_agent(df, feature_cols, total_timesteps=30000,
                    stop_loss=0.02, take_profit=0.03, trans_cost=0.001):
     """
     Trains a DQN agent on the trading environment.
@@ -70,7 +71,7 @@ def train_rl_agent(df, feature_cols, total_timesteps=10000,
     Args:
         df (pd.DataFrame): Feature-engineered dataframe with OHLCV + features.
         feature_cols (list): List of feature column names.
-        total_timesteps (int): Number of training timesteps for DQN.
+        total_timesteps (int): Number of training timesteps for DQN (default 30,000).
         stop_loss (float): Stop-loss threshold.
         take_profit (float): Take-profit threshold.
         trans_cost (float): Transaction cost per trade.
@@ -91,17 +92,18 @@ def train_rl_agent(df, feature_cols, total_timesteps=10000,
     # Create callback for logging
     logger_callback = TrainingLogger()
 
-    # Create DQN model
+    # Create DQN model with tuned hyperparameters
     model = DQN(
         "MlpPolicy",
         env,
         learning_rate=1e-3,
-        buffer_size=10000,
-        learning_starts=500,
-        batch_size=64,
+        buffer_size=50000,
+        learning_starts=1000,
+        batch_size=128,
         gamma=0.99,
         exploration_fraction=0.3,
         exploration_final_eps=0.05,
+        target_update_interval=500,
         verbose=0
     )
 
@@ -122,6 +124,7 @@ def train_rl_agent(df, feature_cols, total_timesteps=10000,
 def predict_rl_actions(model, df, feature_cols):
     """
     Generates action sequence for each bar using the trained DQN model.
+    Includes position tracking, cooldown, and trend filter constraints.
 
     Args:
         model (DQN): Trained DQN model.
@@ -132,7 +135,8 @@ def predict_rl_actions(model, df, feature_cols):
         list: Action sequence (0=HOLD, 1=BUY, 2=SELL) for each bar.
     """
     actions = []
-    in_position = False  # Track position state for observation
+    in_position = False
+    cooldown_remaining = 0
 
     for i in range(len(df)):
         # Build observation: market features + position state
@@ -149,12 +153,24 @@ def predict_rl_actions(model, df, feature_cols):
             action = 0  # Can't buy if already holding
         if action == 2 and not in_position:
             action = 0  # Can't sell if not holding
+        if action == 1 and cooldown_remaining > 0:
+            action = 0  # Can't buy during cooldown
+
+        # Trend filter: BUY only in uptrend
+        if action == 1 and 'SMA_10' in df.columns and 'SMA_50' in df.columns:
+            if df['SMA_10'].iloc[i] <= df['SMA_50'].iloc[i]:
+                action = 0
+
+        # Decrement cooldown
+        if cooldown_remaining > 0:
+            cooldown_remaining -= 1
 
         # Update position tracking
         if action == 1:
             in_position = True
         elif action == 2:
             in_position = False
+            cooldown_remaining = COOLDOWN_PERIOD
 
         actions.append(action)
 
@@ -206,7 +222,7 @@ if __name__ == "__main__":
     df = load_data("AAPL", "1y")
     df_feat, feat_cols = engineer_features(df)
 
-    model, stats = train_rl_agent(df_feat, feat_cols, total_timesteps=1000)
+    model, stats = train_rl_agent(df_feat, feat_cols, total_timesteps=5000)
     print(f"\nTraining Stats: {stats}")
 
     actions = predict_rl_actions(model, df_feat, feat_cols)

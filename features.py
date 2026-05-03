@@ -1,11 +1,26 @@
+"""
+features.py — Advanced Feature Engineering
+
+Features (PDF-aligned):
+    - Returns (% change)
+    - Volatility (10-day rolling std)
+    - RSI (14-period Relative Strength Index)
+    - Body Ratio (candle body / range)
+    - Upper Wick Ratio
+    - Lower Wick Ratio
+    - SMA_10 Ratio (price / SMA_10)
+    - SMA_50 Ratio (price / SMA_50)
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
+import ta
 
 def engineer_features(df):
     """
     Engineers advanced financial features including price features, 
-    candle structure, and trend features.
+    candle structure, momentum (RSI), and trend features.
     
     Args:
         df (pd.DataFrame): Input dataframe with OHLCV data.
@@ -20,11 +35,14 @@ def engineer_features(df):
     df['Returns'] = df['Close'].pct_change()
     df['Volatility_10'] = df['Returns'].rolling(window=10).std()
     
+    # 2. Momentum Feature — RSI (14-period)
+    df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+    
     # Handle division by zero for candle features
     high_low_diff = df['High'] - df['Low']
     high_low_diff = high_low_diff.replace(0, np.nan) # Avoid division by zero
     
-    # 2. Candle Structure Features
+    # 3. Candle Structure Features
     df['Body_Ratio'] = (df['Close'] - df['Open']) / high_low_diff
     df['Upper_Wick'] = (df['High'] - df[['Open', 'Close']].max(axis=1)) / high_low_diff
     df['Lower_Wick'] = (df[['Open', 'Close']].min(axis=1) - df['Low']) / high_low_diff
@@ -34,7 +52,7 @@ def engineer_features(df):
     df['Upper_Wick'] = df['Upper_Wick'].fillna(0)
     df['Lower_Wick'] = df['Lower_Wick'].fillna(0)
     
-    # 3. Trend Features
+    # 4. Trend Features
     df['SMA_10'] = df['Close'].rolling(window=10).mean()
     df['SMA_50'] = df['Close'].rolling(window=50).mean()
     
@@ -42,23 +60,23 @@ def engineer_features(df):
     df['SMA_10_Ratio'] = df['Close'] / df['SMA_10']
     df['SMA_50_Ratio'] = df['Close'] / df['SMA_50']
     
-    # 4. Target Creation
+    # 5. Target Creation
     # Target: 1 if next day's close > today's close, else 0
     # No leakage: We shift the 'Close' backwards by 1 to align tomorrow's close with today's row
     df['Next_Close'] = df['Close'].shift(-1)
     df['Target'] = (df['Next_Close'] > df['Close']).astype(int)
     
-    # Drop rows with NaN (due to rolling windows, pct_change, and shift)
+    # Drop rows with NaN (due to rolling windows, pct_change, RSI, and shift)
     # This automatically removes the last row which has no 'Next_Close'
     df = df.dropna()
     
-    # Define features to use
+    # Define features to use (now includes RSI)
     feature_cols = [
-        'Returns', 'Volatility_10', 'Body_Ratio', 'Upper_Wick', 'Lower_Wick', 
+        'Returns', 'Volatility_10', 'RSI', 'Body_Ratio', 'Upper_Wick', 'Lower_Wick', 
         'SMA_10_Ratio', 'SMA_50_Ratio'
     ]
     
-    # 5. Normalization
+    # 6. Normalization
     scaler = StandardScaler()
     df[feature_cols] = scaler.fit_transform(df[feature_cols])
     

@@ -3,10 +3,12 @@ main.py — Main Pipeline Orchestrator
 
 Supports both ML (RandomForest) and RL (DQN) pipelines.
 Routes execution based on model_type parameter.
+Includes multi-stock testing capability.
 """
 
 import logging
 import pandas as pd
+import numpy as np
 from data_loader import load_data
 from features import engineer_features
 from evaluation import walk_forward_analysis, walk_forward_analysis_rl, monte_carlo_simulation
@@ -17,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 
 def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
-                 model_type="ML", rl_timesteps=10000):
+                 model_type="ML", rl_timesteps=30000):
     """
     Runs the complete end-to-end trading pipeline.
 
@@ -27,7 +29,7 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
         train_window (int): Walk-forward train window in days.
         test_window (int): Walk-forward test window in days.
         model_type (str): 'ML' for RandomForest, 'RL' for DQN agent.
-        rl_timesteps (int): DQN training timesteps (only used when model_type='RL').
+        rl_timesteps (int): DQN training timesteps (default 30,000).
 
     Returns:
         dict: Results including trades, metrics, equity curves, and training details.
@@ -40,7 +42,7 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
         logging.error("Failed to load data. Exiting pipeline.")
         return None
 
-    # 2. Engineer Features
+    # 2. Engineer Features (now includes RSI)
     df_features, feature_cols = engineer_features(df)
 
     # 3. Baseline Performance (Buy & Hold)
@@ -65,6 +67,7 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
             'avg_reward': rl_training_stats.get('avg_reward', 0.0),
             'best_reward': rl_training_stats.get('best_reward', 0.0),
             'worst_reward': rl_training_stats.get('worst_reward', 0.0),
+            'avg_episode_length': rl_training_stats.get('avg_episode_length', 0),
             'reward_formula': 'PnL × RR_bonus - overtrading - holding - cost'
         }
 
@@ -115,6 +118,70 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90,
     return results
 
 
+def run_multi_stock_test(tickers, period="5y", train_window=365, test_window=90,
+                         model_type="ML", rl_timesteps=30000):
+    """
+    Runs the pipeline on multiple tickers and aggregates results.
+    
+    Args:
+        tickers (list): List of ticker symbols.
+        period (str): Data period.
+        train_window (int): Train window days.
+        test_window (int): Test window days.
+        model_type (str): 'ML' or 'RL'.
+        rl_timesteps (int): DQN timesteps.
+    
+    Returns:
+        list: Per-ticker results.
+        dict: Aggregated average metrics.
+    """
+    logging.info(f"--- Starting Multi-Stock Test ({model_type}) for {tickers} ---")
+    
+    all_results = []
+    all_metrics = []
+    
+    for ticker in tickers:
+        logging.info(f"Processing {ticker}...")
+        try:
+            result = run_pipeline(
+                ticker=ticker, period=period,
+                train_window=train_window, test_window=test_window,
+                model_type=model_type, rl_timesteps=rl_timesteps
+            )
+            if result:
+                all_results.append({
+                    'ticker': ticker,
+                    'metrics': result['metrics'],
+                    'baseline_metrics': result['baseline_metrics'],
+                    'training_details': result['training_details'],
+                    'num_trades': len(result['trades']),
+                })
+                all_metrics.append(result['metrics'])
+        except Exception as e:
+            logging.warning(f"Failed for {ticker}: {e}")
+            all_results.append({
+                'ticker': ticker,
+                'metrics': {},
+                'baseline_metrics': {},
+                'training_details': {},
+                'num_trades': 0,
+                'error': str(e)
+            })
+    
+    # Aggregate average metrics
+    avg_metrics = {}
+    if all_metrics:
+        metric_keys = ['Total_Trades', 'Win_Rate', 'Avg_PnL', 'Sharpe_Ratio', 
+                       'Sortino_Ratio', 'Max_Drawdown', 'Calmar_Ratio', 'Profit_Factor',
+                       'Total_Return']
+        for key in metric_keys:
+            values = [m.get(key, 0) for m in all_metrics if m.get(key) is not None]
+            if values:
+                avg_metrics[key] = np.mean(values)
+    
+    return all_results, avg_metrics
+
+
 def get_live_prediction(ticker="AAPL", model_type="ML"):
     """
     Trains the model on all available historical data up to yesterday,
@@ -135,6 +202,10 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
     df_live['Returns'] = df_live['Close'].pct_change()
     df_live['Volatility_10'] = df_live['Returns'].rolling(window=10).std()
 
+    # RSI (14-period)
+    import ta
+    df_live['RSI'] = ta.momentum.RSIIndicator(df_live['Close'], window=14).rsi()
+
     high_low_diff = df_live['High'] - df_live['Low']
     high_low_diff = high_low_diff.replace(0, pd.NA)
 
@@ -152,7 +223,8 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
     df_live['SMA_10_Ratio'] = df_live['Close'] / df_live['SMA_10']
     df_live['SMA_50_Ratio'] = df_live['Close'] / df_live['SMA_50']
 
-    feature_cols = ['Returns', 'Volatility_10', 'Body_Ratio', 'Upper_Wick', 'Lower_Wick', 'SMA_10_Ratio', 'SMA_50_Ratio']
+    feature_cols = ['Returns', 'Volatility_10', 'RSI', 'Body_Ratio', 'Upper_Wick', 
+                    'Lower_Wick', 'SMA_10_Ratio', 'SMA_50_Ratio']
     df_live = df_live.dropna(subset=feature_cols)
 
     df_live['Next_Close'] = df_live['Close'].shift(-1)
@@ -174,7 +246,7 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
         from rl_agent import train_rl_agent, get_rl_live_prediction
 
         # Train RL agent
-        model, stats = train_rl_agent(train_df, feature_cols, total_timesteps=5000)
+        model, stats = train_rl_agent(train_df, feature_cols, total_timesteps=10000)
 
         # Predict
         result = get_rl_live_prediction(model, today_df.iloc[0], feature_cols, in_position=False)
@@ -182,7 +254,7 @@ def get_live_prediction(ticker="AAPL", model_type="ML"):
         action_emoji = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}
         return {
             'prediction': result['action_name'],
-            'confidence': None,  # RL doesn't have confidence like ML
+            'confidence': None,
             'latest_close': today_df['Close'].iloc[0],
             'date': today_df.index[0].strftime('%Y-%m-%d'),
             'model_type': 'RL (DQN)',
@@ -213,6 +285,6 @@ if __name__ == "__main__":
         print(f"ML Pipeline successful. Trades: {len(results['trades'])}")
 
     # Test RL pipeline
-    results_rl = run_pipeline(model_type="RL", rl_timesteps=1000)
+    results_rl = run_pipeline(model_type="RL", rl_timesteps=5000)
     if results_rl:
         print(f"RL Pipeline successful. Trades: {len(results_rl['trades'])}")
