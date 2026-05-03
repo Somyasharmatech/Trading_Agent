@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-from main import run_pipeline
+from main import run_pipeline, get_live_prediction
 
 st.set_page_config(page_title="AI Trading Agent", layout="wide")
 
@@ -16,7 +16,20 @@ period = st.sidebar.selectbox("Data Period", options=["1y", "2y", "5y", "10y"], 
 train_window = st.sidebar.slider("Walk-Forward Train Window (days)", 100, 1000, 365)
 test_window = st.sidebar.slider("Walk-Forward Test Window (days)", 30, 365, 90)
 
-if st.sidebar.button("Run Simulation"):
+# --- Live Prediction Section ---
+st.markdown("### 🔮 Live Prediction for Next Trading Day")
+with st.spinner(f"Generating live prediction for {ticker}..."):
+    live_pred = get_live_prediction(ticker)
+
+if live_pred:
+    pred_color = "🟢" if live_pred['prediction'] == "BUY" else "🔴"
+    st.info(f"**{ticker} ({live_pred['date']}) Last Close:** ₹{live_pred['latest_close']:.2f}  |  **Prediction:** {pred_color} {live_pred['prediction']}  |  **Confidence:** {live_pred['confidence']:.2%}")
+else:
+    st.warning("Could not generate live prediction.")
+
+st.markdown("---")
+
+if st.sidebar.button("Run Historical Simulation"):
     with st.spinner(f"Running complete pipeline for {ticker}..."):
         results = run_pipeline(ticker, period, train_window, test_window)
         

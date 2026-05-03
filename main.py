@@ -4,10 +4,11 @@ from data_loader import load_data
 from features import engineer_features
 from evaluation import walk_forward_analysis, monte_carlo_simulation
 from metrics import get_baseline_performance, compute_daily_equity
+from model import train_model, predict
 
 def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90):
     """
-    Runs the complete end-to-end trading pipeline.
+    Runs the complete end-to-end trading pipeline (Backtest).
     """
     logging.info(f"--- Starting Pipeline for {ticker} ---")
     
@@ -22,8 +23,6 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90):
     
     # 3. Baseline Performance
     baseline_metrics, baseline_equity = get_baseline_performance(df_features)
-    logging.info(f"Baseline Return: {baseline_metrics['Total_Return']:.2%}")
-    logging.info(f"Baseline Max Drawdown: {baseline_metrics['Max_Drawdown']:.2%}")
     
     # 4. Walk-Forward Analysis (Simulating real-world deployment)
     metrics, trades_df = walk_forward_analysis(
@@ -53,21 +52,73 @@ def run_pipeline(ticker="AAPL", period="5y", train_window=365, test_window=90):
         'baseline_equity': baseline_equity
     }
     
-    logging.info(f"--- Pipeline Completed for {ticker} ---")
-    logging.info(f"Total Trades: {metrics.get('Total_Trades', 0)}")
-    logging.info(f"Win Rate: {metrics.get('Win_Rate', 0):.2%}")
-    logging.info(f"Total Return: {metrics.get('Total_Return', 0):.2%}")
-    logging.info(f"Sharpe Ratio: {metrics.get('Sharpe_Ratio', 0):.2f}")
-    logging.info(f"Max Drawdown: {metrics.get('Max_Drawdown', 0):.2%}")
-    
     return results
+
+def get_live_prediction(ticker="AAPL"):
+    """
+    Trains the model on all available historical data up to yesterday,
+    and makes a prediction for TOMORROW based on TODAY's features.
+    """
+    df = load_data(ticker, period="2y")
+    if df.empty:
+        return None
+        
+    df_live = df.copy()
+    df_live['Returns'] = df_live['Close'].pct_change()
+    df_live['Volatility_10'] = df_live['Returns'].rolling(window=10).std()
+    
+    high_low_diff = df_live['High'] - df_live['Low']
+    high_low_diff = high_low_diff.replace(0, pd.NA) 
+    
+    df_live['Body_Ratio'] = (df_live['Close'] - df_live['Open']) / high_low_diff
+    df_live['Upper_Wick'] = (df_live['High'] - df_live[['Open', 'Close']].max(axis=1)) / high_low_diff
+    df_live['Lower_Wick'] = (df_live[['Open', 'Close']].min(axis=1) - df_live['Low']) / high_low_diff
+    
+    df_live['Body_Ratio'] = df_live['Body_Ratio'].fillna(0)
+    df_live['Upper_Wick'] = df_live['Upper_Wick'].fillna(0)
+    df_live['Lower_Wick'] = df_live['Lower_Wick'].fillna(0)
+    
+    df_live['SMA_10'] = df_live['Close'].rolling(window=10).mean()
+    df_live['SMA_50'] = df_live['Close'].rolling(window=50).mean()
+    
+    df_live['SMA_10_Ratio'] = df_live['Close'] / df_live['SMA_10']
+    df_live['SMA_50_Ratio'] = df_live['Close'] / df_live['SMA_50']
+    
+    feature_cols = ['Returns', 'Volatility_10', 'Body_Ratio', 'Upper_Wick', 'Lower_Wick', 'SMA_10_Ratio', 'SMA_50_Ratio']
+    df_live = df_live.dropna(subset=feature_cols)
+    
+    df_live['Next_Close'] = df_live['Close'].shift(-1)
+    df_live['Target'] = (df_live['Next_Close'] > df_live['Close']).astype(int)
+    
+    # Training set (all except today)
+    train_df = df_live.iloc[:-1].copy()
+    
+    # Today's features (last row)
+    today_df = df_live.iloc[[-1]].copy()
+    
+    # Scale
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    train_df[feature_cols] = scaler.fit_transform(train_df[feature_cols])
+    today_df[feature_cols] = scaler.transform(today_df[feature_cols])
+    
+    # Train
+    model = train_model(train_df, feature_cols)
+    
+    # Predict
+    preds, probs = predict(model, today_df, feature_cols)
+    
+    prediction = "BUY" if preds[0] == 1 else "SELL / AVOID"
+    confidence = probs[0] if preds[0] == 1 else 1 - probs[0]
+    
+    return {
+        'prediction': prediction,
+        'confidence': confidence,
+        'latest_close': today_df['Close'].iloc[0],
+        'date': today_df.index[0].strftime('%Y-%m-%d')
+    }
 
 if __name__ == "__main__":
     results = run_pipeline()
     if results:
-        print("\n--- Summary Metrics ---")
-        for k, v in results['metrics'].items():
-            if isinstance(v, float):
-                print(f"{k}: {v:.4f}")
-            else:
-                print(f"{k}: {v}")
+        print("Pipeline successful.")
